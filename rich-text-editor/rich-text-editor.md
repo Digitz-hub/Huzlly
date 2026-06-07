@@ -1,7 +1,7 @@
 # Rich Text Editor — Project Documentation
 
 > **Single source of truth** for the custom Notion-like block-based rich text editor built for Bubble.io.  
-> Last updated: June 7–8, 2026 · Current version: **v8**
+> Last updated: June 8, 2026 · Current source file: **huzlly_rich_editor_v7.html**
 
 ---
 
@@ -15,7 +15,7 @@
 6. [CSS Custom Properties & Design Tokens](#6-css-custom-properties--design-tokens)
 7. [Layout Geometry Reference](#7-layout-geometry-reference)
 8. [State Machine — Height & Scroll Behavior](#8-state-machine--height--scroll-behavior)
-9. [Key JavaScript Functions](#9-key-javascript-functions)
+9. [Key JavaScript Functions & State Variables](#9-key-javascript-functions--state-variables)
 10. [Bubble.io Integration](#10-bubbleio-integration)
 11. [Known Bug Fixes & Root Cause Log](#11-known-bug-fixes--root-cause-log)
 12. [Conventions & Code Style](#12-conventions--code-style)
@@ -25,13 +25,13 @@
 
 ## 1. Project Overview
 
-A **self-contained, single-file** HTML/CSS/JS snippet intended to be pasted directly into a Bubble.io **HTML Element**. It functions as a Notion-inspired block-based rich text editor with:
+A **self-contained, single-file** HTML/CSS/JS snippet (`huzlly_rich_editor_v7.html`) intended to be pasted directly into a Bubble.io **HTML Element**. It functions as a Notion-inspired block-based rich text editor with:
 
 - A floating **Plus (+) button** that tracks the active cursor line and opens a contextual block-formatting menu.
-- A **horizontal icon-only toolbar** (expandable from the `+` button) with CSS tooltips.
+- A **horizontal icon-only toolbar** (expandable from the `+` button) with CSS-only tooltips.
 - Full **Bubble.io Toolbox plugin** integration for real-time data sync.
 - **Secure initial content hydration** from Bubble dynamic data via a `data-initial-content` attribute.
-- **State-based height behavior**: compact on load, auto-expands on focus, restores on blur.
+- **State-based height behavior**: compact fixed-height with scrollbar on load, auto-expands on focus, restores on blur.
 
 ---
 
@@ -41,11 +41,13 @@ A **self-contained, single-file** HTML/CSS/JS snippet intended to be pasted dire
 |---|---|
 | Framework | Vanilla JavaScript only — no React, Vue, or heavy frameworks |
 | Styling | Plain CSS with custom properties; no preprocessors |
-| Font | `'DM Sans', system-ui, sans-serif` — inherited from Bubble's global load; **no `@import`** |
+| Font | `'DM Sans', system-ui, sans-serif` via `--font-body`; Google Fonts `@import` is present but can be removed if Bubble loads DM Sans globally |
+| Monospace font | `'JetBrains Mono', 'Fira Mono', monospace` via `--font-mono` (used in `<code>` and `<pre>` blocks) |
 | Editor core | `<div contenteditable="true">` |
 | Bubble sync | Toolbox plugin — `bubble_fn_saveEditorData(html)` |
-| External deps | None |
+| External deps | None (Google Fonts import only) |
 | Target environment | Bubble.io HTML Element (iframe sandbox) |
+| Accessibility | `aria-label`, `aria-expanded`, `role="toolbar"` on interactive elements |
 
 ---
 
@@ -54,44 +56,47 @@ A **self-contained, single-file** HTML/CSS/JS snippet intended to be pasted dire
 ### 3.1 HTML Structure
 
 ```
-.huz-wrap                        ← outer resizable frame (owns overflow + resize handle)
-  └── .huz-editor-body           ← inner flex row container
-        ├── .huz-plus-col        ← left gutter column (44px wide)
-        │     ├── #huz-plus-btn  ← floating + / × toggle button (position: absolute)
-        │     └── #huz-block-menu← horizontal toolbar pill (position: fixed in viewport)
-        └── #huz-editor          ← contenteditable div (the typing canvas)
+.huz-wrap  #huz-wrap                ← outer frame (owns overflow + resize handle)
+  └── .huz-editor-body              ← inner flex row (display: flex)
+        ├── .huz-plus-col           ← left gutter column (44px wide, flex-shrink: 0)
+        │     ├── #huz-plus-btn     ← floating + / × toggle (position: absolute)
+        │     └── #huz-block-menu   ← horizontal toolbar pill (position: absolute, left: 49px)
+        └── #huz-editor             ← contenteditable div (the typing canvas)
 ```
 
-### 3.2 Two-Layer Scroll / Resize Model
+### 3.2 Scroll / Resize Model
 
 The wrapper (`.huz-wrap`) owns both `resize: vertical` and `overflow`. This is the only correct way to show a native browser resize grip alongside a scrollbar — both must live on the same element.
 
 ```
-.huz-wrap         → overflow: auto  + resize: vertical   (default / blur state)
-                  → overflow: visible + resize: none       (active / focus state)
+Default state (page load / blur):
+  .huz-wrap  → overflow-x: hidden; overflow-y: auto; resize: vertical; min-height: 180px
+  #huz-editor → height: auto; min-height: 180px (grows to content, wrapper clips/scrolls)
 
-#huz-editor       → height: auto + overflow-y: visible always
-                    (grows naturally; wrapper does the clipping/scrolling)
+Active state (focus — CSS :focus-within driven, no JS class toggle):
+  .huz-wrap  → :focus-within applies accent border + glow (see note in §8)
+  Layout:     same overflow/resize — wrapper still scrolls/clips if needed
 ```
 
-### 3.3 Block Menu Position
+> **Note on overflow-x/overflow-y split:** `overflow-x: hidden` suppresses horizontal scroll. `overflow-y: auto` enables the vertical scrollbar. Browsers only remove the native resize grip when `overflow` is `hidden` on **both** axes — so pairing `hidden`/`auto` keeps the resize handle alive.
 
-`#huz-block-menu` uses `position: fixed` (viewport coordinates) rather than `position: absolute`. This escapes the wrapper's `overflow: auto` clipping context, so the menu is never cut off regardless of wrapper scroll state. `setMenuPosition()` reads `getBoundingClientRect()` from `#huz-plus-btn` at open-time to anchor the menu.
+### 3.3 Block Menu Positioning
+
+`#huz-block-menu` uses `position: absolute` within `.huz-plus-col`. It is anchored at `left: 49px` (fixed in CSS) and its `top` is set dynamically by `setButtonTop()`. The menu uses `translateY(-50%)` in CSS so its vertical midpoint aligns with the `+` button's center.
 
 ### 3.4 Cursor Rendering Pipeline (FOUC prevention)
 
 To prevent Flash of Unstyled Content on cursor color:
 
-1. Critical cursor CSS block is placed **above** any `@import` in `<style>` (parsed synchronously on first layout pass).
-2. `style="cursor:text;color-scheme:light;"` is inlined on both `.huz-wrap` and `#huz-editor` (applied before CSS engine starts).
-3. No `@import` for Google Fonts — font is inherited from Bubble's global stylesheet.
+1. Critical cursor CSS is placed **above** the `@import` in `<style>` — parsed synchronously before any network fetch starts.
+2. `style="cursor:text;color-scheme:light;"` is inlined on `.huz-wrap` and `#huz-editor` — applied by the HTML parser before the CSS engine runs.
+3. If Bubble loads DM Sans globally, the `@import` line can be deleted entirely to eliminate the render-block dependency.
 
 ---
 
 ## 4. Version History & Changelog
 
 ### v1 — Initial Build
-**Snapshot:** `Notion-like-block-editor-for-Bubble-io_snapshot_1.md`
 
 **Features introduced:**
 - `contenteditable` div editor with CSS `resize: vertical`
@@ -106,7 +111,6 @@ To prevent Flash of Unstyled Content on cursor color:
 ---
 
 ### v2 — Toolbar Refactor & Menu Animation
-**Snapshot:** `Notion-like-block-editor-for-Bubble-io_snapshot_1.md` (turn 2)
 
 **Changes:**
 - Removed word/char count footer (`.huz-footer`, `#huz-wc`, `#huz-cc`, `updateCount()`)
@@ -116,155 +120,80 @@ To prevent Flash of Unstyled Content on cursor color:
 - Menu animates left→right: `transform-origin: left center` + `scaleX(0→1)` with `cubic-bezier(0.22,1,0.36,1)`
 - Menu uses `visibility: hidden` (not `display: none`) so exit animation plays fully
 - All menu interactions use `mousedown` + `e.preventDefault()` to preserve editor focus
-- Blur guard: editor blur won't close menu if focus moves into the menu (`e.relatedTarget`)
+- Blur guard: editor blur won't close menu if focus moves into the menu (`e.relatedTarget` check)
 
 ---
 
 ### v3 — Horizontal Icon Menu, Plus Button First-Line Fix, Resize Handle Deduplication
-**Snapshot:** `Notion-like-block-editor-for-Bubble-io_snapshot_1.md` (turn 3)
 
 **Bug fixes:**
-1. **Plus button on first line** — `positionPlusBtn(null)` now checks `document.activeElement === editor` before hiding; if focused, calls `showOnFirstLine()` instead. Both `focus` and `click` listeners use `setTimeout(..., 0)` to let the browser commit cursor position first.
-2. **Horizontal icon-only menu** — `#huz-block-menu` changed to `flex-direction: row`. Buttons show only glyphs (`H1`, `•`, `1.`, `❝`, `B`, `I`). Tooltips are pure CSS via `::after`/`::before` reading `data-tip` attribute; slide up with opacity fade.
-3. **Double resize handle** — Changed `.huz-wrap` from `overflow: auto` to `overflow: hidden`. Removed `.huz-resize-hint` SVG div entirely.
+1. **Plus button on first line** — `positionPlusBtn(null)` checks `document.activeElement === editor` before hiding; calls `showOnFirstLine()` if focused. `focus` and `click` listeners use `setTimeout(..., 0)` to let the browser commit cursor position first.
+2. **Horizontal icon-only menu** — `#huz-block-menu` changed to `flex-direction: row`. Buttons show only glyphs. Tooltips are pure CSS via `::after`/`::before` reading `data-tip` attribute.
+3. **Double resize handle** — Removed `.huz-resize-hint` SVG div entirely; adjusted overflow strategy.
 
 ---
 
 ### v4 — 5 Critical Bug Fixes (List Items, Menu Centering, Tooltips, Scrollbar, Padding)
-**Snapshot:** `Fix-critical-bugs-in-custom-block-based-rich-text-editor_snapshot_2.md` (turn 1)
 
 **Bug fixes:**
-1. **Plus button on list items** — `positionPlusBtn()` now checks if block is `<ul>/<ol>`; if so, walks selection anchor to nearest `<li>` and uses *that* element's `getBoundingClientRect()`.
-2. **Menu vertical centering** — `setButtonTop(px)` sets button `top` to `px`, and menu `top` to `px + 11` (button's vertical midpoint, since button is 22px tall). Menu's `translateY(-50%)` centers its own midpoint on that coordinate.
-3. **Tooltips below** — `top: calc(100% + 7px)` + `border-bottom-color` arrow pointing up.
-4. **Scrollbar restored** — `overflow-y: auto` on `.huz-editor-body`; uniform padding standardized.
-5. **Uniform padding** — `16px` on top, right, and bottom; left `4px` + 38px column = balanced optical weight.
+1. **Plus button on list items** — `positionPlusBtn()` checks if block is `<ul>/<ol>`; walks selection anchor to nearest `<li>` and uses that element's `getBoundingClientRect()`.
+2. **Menu vertical centering** — `setButtonTop(px)` sets button `top` to `px`, menu `top` to `px + 11` (button midpoint). Menu's `translateY(-50%)` aligns its center on that coordinate.
+3. **Tooltips below icons** — `top: calc(100% + 7px)` + `border-bottom-color` arrow pointing up.
+4. **Scrollbar** — `overflow-y: auto` strategy; padding standardized.
+5. **Padding** — `16px` on top/right/bottom; left accounts for gutter column.
 
-**Architecture note:** `showOnFirstLine()` now accounts for `editor.scrollTop` to keep plus button correct when scrolled.
+`showOnFirstLine()` updated to include `editor.scrollTop` offset.
 
 ---
 
 ### v5 — Static Frame / Internal Scroll Architecture
-**Snapshot:** `Fix-critical-bugs-in-custom-block-based-rich-text-editor_snapshot_2.md` (turn 2)
 
-**Core architectural change:**
-
-| Layer | Default state | Active state |
-|---|---|---|
-| `.huz-wrap` | `height: 220px; overflow: hidden; resize: vertical` | `height: auto; overflow: visible; resize: none` |
-| `.huz-editor-body` | `position: absolute; inset: 0` | `position: relative; min-height: 220px` |
-| `#huz-editor` | `height: 100%; overflow-y: auto` | `height: auto; overflow: visible` |
-
-JS `activate()` adds `.is-active` to wrapper on first focus. `isActive` flag ensures it runs exactly once per session (no blur reset in v5).
-
-**Additional fixes:**
-- Plus button measures against `.huz-plus-col` bounding rect (`getPlusColRect()`) in both layout modes
-- `#huz-editor` padding: `16px` (shorthand, all sides)
+**Core architectural change:** `.huz-wrap` became a fixed-height frame (`height: 220px; overflow: hidden`) with `.huz-editor-body` using `position: absolute; inset: 0`. JS `activate()` toggled `.is-active` on first focus to switch to `height: auto`. One-way — no blur reset.
 
 ---
 
-### v6 — Static Border, Auto-Grow + Blur Reset, Uniform Padding
-**Snapshot:** `Fix-critical-bugs-in-custom-block-based-rich-text-editor_snapshot_2.md` (turn 3) & `Refactor-rich-text-editor-height-focus-and-padding-behaviors_snapshot_3.md` (turn 1)
+### v6 — Static Border Attempt, Auto-Grow + Blur Reset, Uniform Padding
 
 **Changes:**
-
-**Fix 1 — Static border on focus:**
-```css
-.huz-wrap:focus-within {
-  border-color: var(--border);  /* identical to default */
-  box-shadow: none;
-  outline: none;
-}
-```
-`transition` removed from `.huz-wrap` entirely — no animation on any interaction.
-
-**Fix 2 — Smart auto-grow with blur reset:**
-- `.huz-is-active` class toggled by JS on focus/click → removes on blur
-- Compact state: `overflow: hidden` + `position: absolute` body fills fixed wrapper height
-- Active state: `overflow: visible`, body in normal flow, wrapper grows with content
-- 100ms blur defer prevents accidental collapse when clicking menu buttons
-
-**Fix 3 — Uniform 16px padding:**
-- `#huz-editor`: `padding: 16px` on all four sides
-- `.huz-plus-col`: `width: 0` — button and menu are `position: absolute`, column takes no layout space
-
-> **Bubble note:** Set HTML element height to **"Fit content"** in Bubble's element settings.
+- Attempted removal of focus border glow from `.huz-wrap:focus-within`
+- Smart auto-grow with blur reset via `.huz-is-active` JS class
+- `#huz-editor` padding: `16px` all sides
+- `.huz-plus-col` briefly set to `width: 0`
 
 ---
 
-### v7 — Resize Handle + Scrollbar Restored, `position: fixed` Menu, 20px Padding
-**Snapshot:** `Refactor-rich-text-editor-height-focus-and-padding-behaviors_snapshot_3.md` (turn 2)
+### v7 — Current Source (`huzlly_rich_editor_v7.html`)
 
-**Root cause of missing resize handle:**  
-Browser only shows native resize grip when `resize: vertical` + `overflow` is **not** `visible`. In v5/v6, `overflow: hidden` on the wrapper clipped the scrollbar inside its boundary.
+**This is the version currently in the source file.**
 
-**Fix:** Collapse `.huz-wrap` into a direct scroll host:
+**Core architectural change — wrapper as direct scroll host:**
 
-| State | `.huz-wrap` | `#huz-editor` |
-|---|---|---|
-| Default / blur | `height: 220px; overflow: auto; resize: vertical` | `height: auto; overflow-y: visible` |
-| Active (focus/click) | `height: auto; overflow: visible; resize: none` | unchanged |
-| Blur reset | Revert to default (100ms defer, cancellable) | unchanged |
+The root problem in v5/v6 was that `overflow: hidden` on the wrapper clipped the scrollbar inside its boundary, and `overflow: visible` prevented the browser from showing the native resize grip. The v7 solution:
 
-**Menu escape hatch:** `#huz-block-menu` changed to `position: fixed`. `setMenuPosition()` uses `getBoundingClientRect()` on `#huz-plus-btn` for viewport-relative anchoring. This prevents the wrapper's `overflow: auto` from clipping the menu.
+- `.huz-wrap` uses `overflow-x: hidden` + `overflow-y: auto` (not `hidden` on both axes → resize grip stays visible)
+- `.huz-editor-body` is normal flow (`display: flex`, `min-height: inherit`)
+- `#huz-editor` grows naturally to content height; wrapper clips/scrolls when content exceeds `min-height: 180px`
+- Height state is managed entirely by CSS `:focus-within` (border/glow) — no JS class toggling for height
 
-**Other changes:**
-- `#huz-editor` padding: `20px` on all four sides
-- Blur defer timer cancellable via `clearTimeout(blurTimer)` in `mousedown` handlers
+**Left gutter geometry finalized:**
+- `.huz-plus-col`: `44px` wide, `flex-shrink: 0`
+- `#huz-plus-btn`: `left: 11px` — centered: `(44−22)/2 = 11px`
+- `#huz-block-menu`: `left: 49px` — button right edge (33px) + 16px gap
+- `#huz-editor`: `padding: 16px 16px 16px 5px` — left 5px gives 16px clearance from button right edge
 
----
+**Caret & cursor fixes:**
+- `caret-color: #1a1a18` — solid dark blinking caret
+- `cursor: text; color-scheme: light` — prevents OS dark-mode cursor inversion
+- FOUC prevention: critical cursor rules hoisted above `@import` in `<style>`, plus inline `style` attributes on markup
 
-### v8 — Left Gutter Geometry, Caret Color, Cursor FOUC Fix, Font Import Removal, Focus Bug Fix
-**Snapshots:** `Refactor-rich-text-editor-height-focus-and-padding-behaviors_snapshot_3.md` (turns 3–4) & `Refactor-block-editor-layout-and-cursor-styling_snapshot_4.md` (all turns)
+**`min-height` set to `180px`** (not 220px as in earlier experimental versions).
 
-#### Left Gutter Geometry (CSS-only)
+**Padding:** `16px` top/right/bottom, `5px` left on `#huz-editor` (not 20px — that was a brief v7-draft value that was not retained).
 
-Restored `.huz-plus-col` to `44px` wide as a true reserved gutter:
-
-| Measurement | Value |
-|---|---|
-| Column width | 44 px |
-| Button `left` offset | 11 px (`(44−22)/2`) |
-| Button right edge | 33 px from container wall |
-| Button shadow right edge | 36 px (+ 3px box-shadow) |
-| `#huz-editor` `padding-left` | 5 px |
-| Text cursor start | 49 px from container wall |
-| **Gap (button → text)** | **16 px** ✓ |
-| `#huz-block-menu` `left` | 49 px (button right edge 33px + 16px gap) |
-
-#### Caret & Cursor Color
-```css
-#huz-editor {
-  caret-color: #1a1a18;      /* solid dark blinking caret */
-  cursor: text;               /* locks hover pointer to I-beam */
-  color-scheme: light;        /* prevents OS dark-mode cursor inversion */
-}
-```
-
-**Why `color-scheme: light` is needed:** When a Bubble page or OS-level dark mode sets a dark `color-scheme`, browsers invert system UI cursors — turning the black I-beam white/invisible. Pinning `color-scheme: light` on the editor element forces the OS cursor renderer to always use the dark-on-light variant.
-
-#### FOUC Prevention for Cursor
-
-Critical rules hoisted **above** any `@import`:
-```css
-/* Parsed synchronously — before any network fetches */
-.huz-wrap, .huz-editor-body, #huz-editor { cursor: text; color-scheme: light; }
-#huz-plus-btn, .huz-menu-btn, #huz-clear-fmt { cursor: pointer; }
-```
-
-Inline styles on markup as absolute-earliest fallback:
-```html
-<div class="huz-wrap" style="cursor:text;color-scheme:light;">
-<div id="huz-editor" ... style="cursor:text;color-scheme:light;">
-```
-
-#### Font Import Removal
-- Deleted `@import url('https://fonts.googleapis.com/...')` — Bubble already loads DM Sans globally.
-- `font-family: 'DM Sans', system-ui, sans-serif` retained in all selectors (inherits pre-cached font).
-- This eliminates the render-block on cursor CSS that caused the FOUC.
-
-#### Rogue Focus Bug Fix
-`document.addEventListener('click', ...)` scoped to check `wrap.contains(e.target)` — clicks outside the component no longer trigger any component logic. Previously the global listener ran on every page click.
+**What v7 did NOT implement from the v8 roadmap:**
+- `.huz-wrap:focus-within` still applies accent border + glow (not static)
+- `@import` for Google Fonts is still present
+- `document.addEventListener('click', ...)` is not scoped to `wrap.contains(e.target)`
 
 ---
 
@@ -275,42 +204,60 @@ Inline styles on markup as absolute-earliest fallback:
 | Behavior | Implementation |
 |---|---|
 | Tracks active line | `positionPlusBtn(block)` reads `getBoundingClientRect()` of active block element |
-| List item precision | If active block is `<ul>/<ol>`, walks to nearest `<li>` for rect |
+| List item precision | If active block is `<ul>/<ol>`, walks selection anchor to nearest `<li>` for rect |
 | First-line on empty editor | `showOnFirstLine()` reads caret rect from live selection; falls back to `padding-top + lineHeight/2` |
-| `+` → `×` morph | CSS `transform: rotate(45deg)` on `.open` class — no JS string swap |
+| Scroll compensation | Both `positionPlusBtn` and `showOnFirstLine` add `editor.scrollTop` to `top` offset |
+| `+` → `×` morph | CSS `transform: rotate(45deg)` on `.open` class |
 | Menu open animation | `scaleX(0→1)`, `transform-origin: left center`, `cubic-bezier(0.22,1,0.36,1)` |
 | Focus preservation | `mousedown` + `e.preventDefault()` on all menu interactions |
+| Hidden by default | `opacity: 0; pointer-events: none` — `.visible` class enables it |
+| Accessibility | `aria-label="Insert block"`, `aria-expanded` toggled on open/close |
 
 ### 5.2 Block Menu
 
 | Property | Value |
 |---|---|
 | Layout | `display: flex; flex-direction: row` (horizontal pill) |
-| Position | `position: fixed` (escapes overflow clipping) |
-| Anchoring | `setMenuPosition()` reads `#huz-plus-btn` `getBoundingClientRect()` at open-time |
-| Icons | Glyph-only (`H1`, `H2`, `•`, `1.`, `❝`, `B`, `I`, `U`, `S`, etc.) |
+| Position | `position: absolute` within `.huz-plus-col`; `left: 49px` fixed in CSS |
+| Vertical anchor | `top` set dynamically by `setButtonTop()`; `translateY(-50%)` centers it on button |
+| Icons | Glyph-only (`H1`, `H2`, `H3`, `•`, `1.`, `❝`, `</>`，`—`, `B`, `I`, `U`, `S`, `⬅`, `⬌`, `➡`, `⌫`) |
 | Tooltips | Pure CSS `::after`/`::before` reading `data-tip` attribute; appear **below** icon |
 | Separators | Thin `1px` vertical `.huz-menu-sep` dividers between groups |
 | Visibility trick | `visibility: hidden` (not `display: none`) so exit animation completes |
-| Blur guard | Checks `e.relatedTarget` — editor blur won't close menu if focus moves into menu |
+| Blur guard | `e.relatedTarget` check — editor blur won't close menu if focus moves into menu |
+| Accessibility | `role="toolbar"`, `aria-label="Block & format options"` |
 
 ### 5.3 Supported Block Types
 
-| Icon | Block type | Format applied |
+| Glyph | Block type | HTML produced |
 |---|---|---|
-| `¶` | Paragraph | `<p>` |
 | `H1` | Heading 1 | `<h1>` |
 | `H2` | Heading 2 | `<h2>` |
 | `H3` | Heading 3 | `<h3>` |
 | `•` | Bullet list | `<ul><li>` |
 | `1.` | Numbered list | `<ol><li>` |
 | `❝` | Blockquote | `<blockquote>` |
-| `</>` | Code block | `<pre><code>` |
-| `—` | Divider | `<hr>` |
+| `</>` | Code block | `<pre>` |
+| `—` | Divider | `<hr>` + new `<p>` after |
 
-### 5.4 Inline Formatting (inside menu)
+> **Default block:** `<p>` is the browser's default for Enter key in `contenteditable`. It is not a menu option but is produced by `Enter` in headings (explicit) and naturally by the browser elsewhere.
 
-Bold (`B`), Italic (`I`), Underline (`U`), Strikethrough (`S`), and a Clear Format button — operated via `document.execCommand` on the saved selection range.
+### 5.4 Inline Formatting
+
+Operated via `document.execCommand` on the restored `savedRange`. All commands keep the menu open so the user can chain multiple formats.
+
+| Glyph | Command | `data-cmd` value |
+|---|---|---|
+| **B** | Bold | `bold` |
+| *I* | Italic | `italic` |
+| U | Underline | `underline` |
+| ~~S~~ | Strikethrough | `strikeThrough` |
+| ⬅ | Align left | `justifyLeft` |
+| ⬌ | Center | `justifyCenter` |
+| ➡ | Align right | `justifyRight` |
+| ⌫ | Clear formatting | `removeFormat` (via `#huz-clear-fmt`) |
+
+Active state: bold/italic/underline/strikeThrough buttons gain `.active` class via `updateInlineBtnStates()` on menu open and after each command.
 
 ### 5.5 Keyboard Shortcuts
 
@@ -319,108 +266,144 @@ Bold (`B`), Italic (`I`), Underline (`U`), Strikethrough (`S`), and a Clear Form
 | `Ctrl/Cmd + B` | Bold |
 | `Ctrl/Cmd + I` | Italic |
 | `Ctrl/Cmd + U` | Underline |
-| `Tab` | Indent list item |
-| `Enter` in heading | Inserts new `<p>` block |
+| `Tab` | Indent (list) |
+| `Shift + Tab` | Outdent (list) |
+| `Enter` in H1/H2/H3 | Inserts new `<p>` after heading, places cursor |
+| `Escape` | Closes block menu |
 
 ---
 
 ## 6. CSS Custom Properties & Design Tokens
 
+All defined in `:root`:
+
 ```css
 :root {
-  --accent:  #534AB7;          /* purple — used on + button glow only */
-  --border:  #e5e7eb;          /* default wrapper border (never changes on focus) */
-  --text:    #1a1a18;          /* primary text color */
-  --bg:      #ffffff;          /* editor background */
-  --t:       180ms ease;       /* general transition duration (not used on wrapper) */
-  --pad:     16px;             /* base padding unit */
+  --bg:          #ffffff;          /* editor + wrapper background */
+  --surface:     #f7f7f5;          /* inline code background */
+  --border:      #e8e8e4;          /* wrapper border, menu border, separators */
+  --text:        #1a1a18;          /* primary text color; also tooltip bg */
+  --text-muted:  #9b9b97;          /* placeholder, blockquote, strikethrough */
+  --accent:      #534AB7;          /* purple — focus border, active btn, blockquote bar */
+  --accent-soft: #eeecfb;          /* light purple — glow ring, hover/active bg */
+  --plus-idle:   #c7c7c2;          /* + button default border + color */
+  --plus-active: #534AB7;          /* + button active/hover border + color */
+  --menu-shadow: 0 6px 28px rgba(0,0,0,0.10), 0 1.5px 5px rgba(0,0,0,0.06);
+  --tooltip-bg:  #1a1a18;          /* tooltip background */
+  --radius:      8px;              /* wrapper border-radius */
+  --font-body:   'DM Sans', system-ui, sans-serif;
+  --font-mono:   'JetBrains Mono', 'Fira Mono', monospace;  /* code/pre blocks */
+  --t:           0.15s ease;       /* standard transition for interactive controls */
 }
 ```
 
-> **Rule:** `.huz-wrap` has **no transition** property — its border and shadow are completely static. The `--accent` color appears only on `#huz-plus-btn` box-shadow ring.
+> **Note:** `.huz-wrap` still has `transition: border-color var(--t), box-shadow var(--t)` — the focus glow is active in v7.
 
 ---
 
 ## 7. Layout Geometry Reference
 
-### 7.1 Horizontal Left-Side Layout (v8 values)
+### 7.1 Horizontal Left-Side Layout (v7 values)
 
 ```
-[container wall]
-|← 44px .huz-plus-col →|← #huz-editor (padding-left: 5px) →|
-         |← 11px →|← 22px btn →|← 16px gap →|← text cursor
-         btn left   btn width    exact gap     text start = 49px
+[wrapper left wall]
+|←────── 44px .huz-plus-col ──────→|←── #huz-editor ──────────────────→|
+         |← 11px →|←─ 22px btn ─→|     padding-left: 5px
+                                   ↑
+                                  49px from wall = text cursor start
+
+Gap from button right edge to text start:
+  Button right edge = 11 + 22 = 33px
+  Text start        = 44 + 5  = 49px
+  Gap               = 49 - 33 = 16px  ✓
+
+Menu left edge = 49px (btn right edge 33px + 16px gap)
+Menu centered  = translateY(-50%) aligns menu midpoint to button midpoint
 ```
 
 ### 7.2 Key Measurements
 
 | Element | Property | Value | Rationale |
 |---|---|---|---|
-| `.huz-plus-col` | `width` | `44px` | True reserved gutter; breathing room around 22px button |
+| `.huz-plus-col` | `width` | `44px` | Reserved gutter; centers 22px button with equal margins |
 | `#huz-plus-btn` | `left` | `11px` | `(44−22)/2` — optically centered in column |
 | `#huz-plus-btn` | `width/height` | `22px` | Touch-friendly minimum |
 | `#huz-block-menu` | `left` | `49px` | Button right edge (33px) + 16px gap |
-| `#huz-editor` | `padding-left` | `5px` | Text start at 49px = exactly 16px from button right edge |
-| `#huz-editor` | `padding` (other sides) | `16px` | Uniform visual breathing room |
-| `.huz-wrap` | `min-height` | `220px` (default) | Compact initial frame height |
+| `#huz-editor` | `padding` | `16px 16px 16px 5px` | Left 5px → text starts 49px from wall, 16px from button |
+| `.huz-wrap` | `min-height` | `180px` | Compact initial frame height |
+| `#huz-editor` | `min-height` | `180px` | Matches wrapper; ensures body always fills wrapper |
 
 ### 7.3 Safe Clearance Proof
 
 | Measurement | Value |
 |---|---|
-| Button right edge | `11 + 22 = 33px` from container |
-| Button shadow right edge | `33 + 3 = 36px` |
-| Text cursor start | `44 + 5 = 49px` |
-| **Safe clearance** | **`49 − 36 = 13px`** — no character, cursor, or shadow touches text |
+| Button right edge | `11 + 22 = 33px` from container wall |
+| Button open shadow right edge | `33 + 3 = 36px` (3px box-shadow ring) |
+| Text cursor start | `44 + 5 = 49px` from container wall |
+| **Safe clearance** | **`49 − 36 = 13px`** — no character or shadow ever touches text |
 
 ---
 
 ## 8. State Machine — Height & Scroll Behavior
 
+In v7, height state is driven by CSS alone (no JS class toggling for height).
+
 ```
-Page Load
-    │
+Page Load / Blur state:
+  .huz-wrap → min-height: 180px; overflow-x: hidden; overflow-y: auto; resize: vertical
+  #huz-editor → min-height: 180px; height: auto (grows to content)
+  → If content exceeds 180px: native vertical scrollbar appears on .huz-wrap
+  → Native resize grip visible (overflow-y: auto satisfies browser requirement)
+  → Border: 1.5px solid var(--border) — subtle, no glow
+
+    │  user focuses editor
     ▼
-[DEFAULT STATE]
-.huz-wrap: height: 220px; overflow: auto; resize: vertical
-#huz-editor: height: auto; overflow-y: visible
-→ Scrollbar appears natively when content > 220px
-→ Native resize grip visible (overflow: auto satisfies browser requirement)
-    │
-    │  user clicks or focuses editor
+
+Active / Focused state (CSS :focus-within — no JS involved):
+  .huz-wrap:focus-within → border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft)
+  → Layout/overflow/resize unchanged — wrapper still scrolls if content overflows
+  → Editor continues to grow naturally (no fixed height cap while focused)
+
+    │  user blurs editor
     ▼
-[ACTIVE STATE]  ← JS activateWrap()
-.huz-wrap: height: auto; overflow: visible; resize: none
-#huz-editor: unchanged
-→ Wrapper auto-expands to fit all content
-→ No internal scroll; no resize grip (height: auto + resize: none)
-→ Bubble HTML element must be set to "Fit content" height
-    │
-    │  user blurs editor (100ms defer, cancellable)
-    ▼
-[DEFAULT STATE]  ← JS deactivateWrap()
+
+Page Load / Blur state (reverts immediately via CSS — no blur timer, no defer)
 ```
 
-**Blur defer mechanism:** A `blurTimer` is set on `blur` events. It is cleared by `clearTimeout(blurTimer)` in the `mousedown` handlers of `#huz-plus-btn` and `#huz-block-menu`, preventing wrapper collapse when the user clicks a menu item (which briefly removes focus from the editor).
+> **v7 behavior note:** There is no JS-driven blur defer or `blurTimer` in the current code. The `+` button hides immediately on blur (unless focus moves to the menu or plus button — `e.relatedTarget` guard). Height/overflow never change — only the border styling changes via `:focus-within`.
 
 ---
 
-## 9. Key JavaScript Functions
+## 9. Key JavaScript Functions & State Variables
+
+### 9.1 State Variables
+
+| Variable | Type | Purpose |
+|---|---|---|
+| `activeBlock` | `Element \| null` | Currently active top-level block under the cursor |
+| `menuOpen` | `boolean` | Whether `#huz-block-menu` is open |
+| `savedRange` | `Range \| null` | Selection range saved on menu open; restored before `execCommand` |
+| `saveTimer` | `number \| null` | Debounce timer ID for `syncToBubble()` |
+
+### 9.2 Functions
 
 | Function | Purpose |
 |---|---|
-| `init()` | Reads `data-initial-content`, injects into `#huz-editor` if not placeholder token |
-| `positionPlusBtn(block)` | Positions `+` button vertically aligned to active block (or `<li>` inside list) |
-| `showOnFirstLine()` | Shows `+` button on first/empty line using caret rect; falls back to `padding-top + lineHeight/2` |
-| `getActiveBlock()` | Returns the top-level block element containing the cursor |
-| `setButtonTop(px)` | Sets button `top: px`; sets menu `top: px + 11` (button midpoint for `translateY(-50%)` centering) |
-| `setMenuPosition()` | Reads `getBoundingClientRect()` from `#huz-plus-btn`; positions `#huz-block-menu` in fixed viewport coords |
-| `openMenu()` / `closeMenu()` | Toggle menu open/close; morph `+`→`×` via `.open` class |
-| `applyBlock(type)` | Applies selected block format to active line; restores cursor focus |
-| `activateWrap()` | Switches wrapper to `height: auto; overflow: visible; resize: none` |
-| `deactivateWrap()` | Restores wrapper to `height: 220px; overflow: auto; resize: vertical` (100ms defer) |
-| `saveDebounced()` | Debounced 500ms call to `bubble_fn_saveEditorData(html)` |
-| `saveFn()` | Immediate (non-debounced) save — called on `blur` |
+| `init()` | Reads `data-initial-content`; injects into `#huz-editor` if not placeholder token and not empty |
+| `syncToBubble()` | Debounced 500ms call to `bubble_fn_saveEditorData(editor.innerHTML)` |
+| `syncNow()` | Immediate (non-debounced) save — called on `blur` |
+| `getActiveBlock()` | Walks selection anchor up to nearest direct child of `#huz-editor`; returns `null` if not inside editor |
+| `positionPlusBtn(block)` | Positions `+` button aligned to active block; resolves to `<li>` rect if inside a list; calls `showOnFirstLine()` if editor is focused but `block` is null |
+| `showOnFirstLine()` | Positions `+` button using live caret `getBoundingClientRect()`; falls back to `padding-top + lineHeight/2` |
+| `setButtonTop(px)` | Sets `plusBtn.style.top = px + 'px'`; sets `blockMenu.style.top = (px + 11) + 'px'` (button's vertical midpoint, for `translateY(-50%)` centering) |
+| `openMenu()` | Saves current selection to `savedRange`; adds `.open` to menu and button; calls `updateInlineBtnStates()` |
+| `closeMenu()` | Removes `.open` from menu and button; sets `aria-expanded` false |
+| `restoreRange()` | Restores `savedRange` into the live selection (called before every `execCommand`) |
+| `insertOrConvertBlock(type)` | Focuses editor; restores range; inserts or replaces the active block with the chosen type; calls `syncToBubble()` |
+| `insertAfter(node, ref)` | DOM helper — inserts `node` after `ref` inside `#huz-editor`; appends if no ref |
+| `placeCursorIn(el)` | Places collapsed selection at first text node inside `el` |
+| `updateInlineBtnStates()` | Reflects `bold`/`italic`/`underline`/`strikeThrough` command state onto `.active` class of inline buttons |
+| `onCursorMove()` | Shared handler for `keyup` and `mouseup` — calls `getActiveBlock()` + `positionPlusBtn()` |
 
 ---
 
@@ -429,10 +412,11 @@ Page Load
 ### 10.1 Data Sync
 
 ```javascript
-// Called automatically on every input (debounced 500ms) and immediately on blur
-if (typeof bubble_fn_saveEditorData === 'function') {
-  bubble_fn_saveEditorData(activeContent); // activeContent = editor.innerHTML
-}
+// Debounced (500ms) — fires on every input event
+syncToBubble() → bubble_fn_saveEditorData(editor.innerHTML)
+
+// Immediate — fires on blur
+syncNow() → bubble_fn_saveEditorData(editor.innerHTML)
 ```
 
 Configure in Bubble Toolbox plugin: expose a function named `saveEditorData`.
@@ -441,17 +425,21 @@ Configure in Bubble Toolbox plugin: expose a function named `saveEditorData`.
 
 ```html
 <!-- Replace #BUBBLE_DYNAMIC_DATA# with your Bubble dynamic expression -->
-<div id="huz-editor"
-     data-initial-content="[Current page Note's Body]"
-     contenteditable="true">
-</div>
+<div
+  id="huz-editor"
+  contenteditable="true"
+  spellcheck="true"
+  data-placeholder="Write something… or click + to insert a block"
+  data-initial-content="[Current page Note's Body]"
+  style="cursor:text;color-scheme:light;"
+></div>
 ```
 
-In `init()`:
+`init()` logic:
 ```javascript
-const raw = editor.getAttribute('data-initial-content');
-if (raw && raw !== '#BUBBLE_DYNAMIC_DATA#') {
-  editor.innerHTML = raw; // safe injection — Bubble renders server-side
+const raw = editor.getAttribute('data-initial-content') || '';
+if (raw && raw !== '#BUBBLE_DYNAMIC_DATA#' && raw.trim() !== '') {
+  editor.innerHTML = raw; // safe — Bubble renders server-side before the HTML reaches the browser
 }
 ```
 
@@ -459,55 +447,57 @@ if (raw && raw !== '#BUBBLE_DYNAMIC_DATA#') {
 
 | Setting | Required value |
 |---|---|
-| Element height | **Fit content** (so Bubble container grows with auto-expanding editor) |
-| Toolbox plugin | Must be installed and `saveEditorData` function exposed |
-| HTML Element | Paste entire single-file snippet |
+| Element height | **Fixed or Fit content** — wrapper has its own scroll; fixed height works fine |
+| Toolbox plugin | Must be installed; `saveEditorData` function must be exposed |
+| HTML Element | Paste the entire `huzlly_rich_editor_v7.html` content |
 
 ---
 
 ## 11. Known Bug Fixes & Root Cause Log
 
-| # | Bug | Root Cause | Fix Applied (version) |
+| # | Bug | Root Cause | Fix applied (version) |
 |---|---|---|---|
-| 1 | `+` button invisible on first empty line | `getActiveBlock()` returned `null` for empty editor; code treated `null` as "hide button" | `showOnFirstLine()` + focus/click `setTimeout(..., 0)` (v3) |
-| 2 | `+` button centers on full `<ul>/<ol>` not active `<li>` | `getBoundingClientRect()` called on parent list, not current list item | Walk selection anchor to nearest `<li>` (v4) |
-| 3 | Menu opens at top edge of button, not centered | Menu `top` set to same value as button `top` | `setButtonTop` feeds `px + 11` to menu; menu uses `translateY(-50%)` (v4) |
-| 4 | Tooltips appearing above icons | CSS `top` / `bottom` placement inverted | `top: calc(100% + 7px)` + bottom-arrow (v4) |
-| 5 | Scrollbar disappeared / resize handle missing | `overflow: hidden` on wrapper clipped scrollbar; resize grip hidden by child elements | Wrapper owns both `overflow: auto` and `resize: vertical` (v7) |
-| 6 | Block menu clipped when wrapper has `overflow: auto` | Absolutely-positioned menu clipped by overflow context | Menu changed to `position: fixed`; `setMenuPosition()` uses viewport coords (v7) |
-| 7 | Wrapper border glows/changes on focus | `:focus-within` rule applied accent color + box-shadow | Explicit static override in `:focus-within`; removed `transition` (v6) |
-| 8 | Caret invisible (white) while typing | `caret-color` inherited incorrect color | `caret-color: #1a1a18` on `#huz-editor` (v8) |
-| 9 | I-beam cursor white/invisible on hover | OS dark-mode `color-scheme` inverted system cursor | `cursor: text; color-scheme: light` on editor (v8) |
-| 10 | Cursor FOUC — I-beam slow to appear on page load | Cursor CSS rules written after `@import` were render-blocked by font network fetch | Hoisted cursor rules above `@import`; added inline `style` attributes; removed `@import` entirely (v8) |
-| 11 | Clicking outside editor steals focus | `document.addEventListener('click', ...)` was globally unscoped | Scoped to `wrap.contains(e.target)` check (v8) |
-| 12 | Text overlaps `+` button / menu | Left gutter too narrow; editor left padding too small | `.huz-plus-col: 44px`, button `left: 11px`, editor `padding-left: 5px` → 16px safe gap (v8) |
-| 13 | Double resize handle in bottom-right corner | `overflow: auto` caused scrollbar track to visually overlap native resize grip | Use `overflow: auto` only on wrapper (not inner `#huz-editor`); removed `.huz-resize-hint` SVG (v3/v7) |
+| 1 | `+` button invisible on first empty line | `getActiveBlock()` returned `null` for empty editor; code treated `null` as "hide button" | `showOnFirstLine()` + `setTimeout(..., 0)` on focus/click (v3) |
+| 2 | `+` button centers on full `<ul>/<ol>` not active `<li>` | `getBoundingClientRect()` called on parent list | Walk selection anchor to nearest `<li>` (v4) |
+| 3 | Menu opens at top edge of button, not centered | Menu `top` set to same px as button `top` | `setButtonTop()` feeds `px + 11` to menu; `translateY(-50%)` in CSS (v4) |
+| 4 | Tooltips appearing above icons | CSS placement inverted | `top: calc(100% + 7px)` + upward-pointing arrow (`border-bottom-color`) (v4) |
+| 5 | Scrollbar disappeared / resize handle missing | `overflow: hidden` on both axes removes native grip; clipped scrollbar invisible | `overflow-x: hidden` + `overflow-y: auto` on `.huz-wrap` (v7) |
+| 6 | Block menu clipped by wrapper overflow | Absolutely-positioned menu subject to overflow clipping | `left: 49px` fixed CSS anchor; menu sized to not exceed wrapper width (v7) |
+| 7 | Caret invisible (white) while typing | `caret-color` not explicitly set | `caret-color: #1a1a18` on `#huz-editor` (v7) |
+| 8 | I-beam cursor white/invisible on hover | OS dark-mode `color-scheme` inverted system cursor | `cursor: text; color-scheme: light` on editor (v7) |
+| 9 | Cursor FOUC — I-beam slow to appear on page load | Cursor CSS written after `@import` render-blocked by font fetch | Hoisted cursor rules above `@import`; inline `style` attributes on markup (v7) |
+| 10 | Text overlaps `+` button / menu | Left gutter undersized; editor left padding too small | `.huz-plus-col: 44px`, button `left: 11px`, `#huz-editor` `padding-left: 5px` → 16px gap (v7) |
+| 11 | Double resize handle in bottom-right | SVG resize hint overlapping native grip | Removed `.huz-resize-hint` SVG entirely (v3); finalized with `overflow-x/y` split (v7) |
+| 12 | Word/char count footer cluttering UI | Initial feature included by default | Removed entirely — `.huz-footer`, `updateCount()` deleted (v2) |
+| 13 | Fixed top toolbar blocking content | Always-visible toolbar wasted space | Removed; merged into floating `+` menu (v2) |
 
 ---
 
 ## 12. Conventions & Code Style
 
-- All CSS class names are prefixed with `huz-` to avoid conflicts with Bubble's global stylesheet.
-- All IDs are prefixed with `huz-`.
-- JavaScript is entirely vanilla — no external libraries.
-- `execCommand` is used for inline formatting (Bold, Italic, Underline, Strikethrough). While deprecated in spec, it remains the most reliable cross-browser method in `contenteditable` contexts as of 2026.
-- `mousedown` + `e.preventDefault()` is used (not `click`) for all menu button interactions. This prevents the editor from losing focus before the saved selection range is restored.
-- The save function is debounced at **500ms** to prevent excessive Bubble workflow triggers during fast typing.
-- Version numbers are tracked in a comment block at the top of the source file.
+- All CSS class names and IDs are prefixed with `huz-` to avoid conflicts with Bubble's global stylesheet.
+- JavaScript is entirely vanilla — no external libraries, no `import` statements.
+- `document.execCommand` is used for inline formatting (Bold, Italic, Underline, Strikethrough, Align, Clear). While deprecated in spec, it remains the most reliable cross-browser approach for `contenteditable` contexts.
+- `mousedown` + `e.preventDefault()` is used (not `click`) for all menu button interactions. This preserves the editor's focus and live selection before `restoreRange()` is called.
+- The save function is debounced at **500ms** to prevent excessive Bubble workflow triggers during fast typing. `syncNow()` fires immediately on `blur`.
+- The entire JS is wrapped in an IIFE (`(function () { 'use strict'; ... })()`) to avoid polluting global scope inside Bubble's iframe.
+- Version numbers are tracked in the comment header block at the top of the source file.
+- `aria-label`, `aria-expanded`, and `role` attributes are maintained on interactive elements for basic accessibility.
 
 ---
 
 ## 13. Bubble Setup Checklist
 
-- [ ] Paste the complete single-file snippet into a Bubble **HTML Element**
-- [ ] Set the HTML Element's height to **"Fit content"** in Bubble element settings
+- [ ] Paste the entire content of `huzlly_rich_editor_v7.html` into a Bubble **HTML Element**
 - [ ] Install the **Toolbox plugin** in Bubble
 - [ ] Create a Bubble workflow exposing a function named `saveEditorData`
 - [ ] Replace `data-initial-content="#BUBBLE_DYNAMIC_DATA#"` with your Bubble dynamic expression (e.g. `[Current page Note's Body]`)
-- [ ] Verify DM Sans is loaded globally in Bubble (prevents font flash)
-- [ ] Test content hydration on page load
-- [ ] Test save trigger fires on input and blur
+- [ ] **Optional performance fix:** If Bubble loads DM Sans globally, delete the `@import url('https://fonts.googleapis.com/...')` line from the `<style>` block — this eliminates the render-blocking font fetch that can delay cursor CSS
+- [ ] Test content hydration on page load (pre-filled content should appear immediately)
+- [ ] Test save trigger fires on both input (debounced) and blur (immediate)
+- [ ] Test vertical resize handle is visible and draggable in the bottom-right corner
+- [ ] Test scrollbar appears when typing content that exceeds the editor's current height
 
 ---
 
-*This file is the canonical knowledge base for the rich-text-editor project. All implementation decisions, architectural choices, and bug resolutions should be recorded here.*
+*This file is the canonical knowledge base for the rich-text-editor project. All implementation decisions, architectural choices, and bug resolutions should be recorded here. The source of truth for actual code is `huzlly_rich_editor_v7.html`.*
