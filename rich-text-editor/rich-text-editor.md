@@ -193,6 +193,13 @@ Two changes were applied as a UI-only update without a version increment:
 | `.huz-wrap` `border` | `1.5px solid var(--border)` | `none` | Borderless design requirement |
 | `.huz-wrap` `transition` | `border-color var(--t), box-shadow var(--t)` | _(removed)_ | No border or shadow to animate |
 | `.huz-wrap:focus-within` block | Present (accent border + glow) | _(removed entirely)_ | Borderless in all states |
+| `#huz-plus-btn.open` `border-color` | `var(--plus-active)` (purple) | `#1a1a18` (black) | No purple in open/active state |
+| `#huz-plus-btn.open` `color` | `var(--plus-active)` (purple) | `#1a1a18` (black) | No purple in open/active state |
+| `#huz-plus-btn.open` `box-shadow` | `0 0 0 3px var(--accent-soft)` | _(removed)_ | No glow in any button state |
+| `#huz-plus-btn:hover` `border-color` | `var(--plus-active)` (purple) | `#1a1a18` (black) | No purple on hover |
+| `#huz-plus-btn:hover` `color` | `var(--plus-active)` (purple) | `#1a1a18` (black) | No purple on hover |
+| `#huz-plus-btn:hover` `box-shadow` | `0 0 0 3px var(--accent-soft)` | _(removed)_ | No glow on hover |
+| `#huz-plus-btn` `transition` | includes `box-shadow 0.15s ease` | _(removed from list)_ | No box-shadow to animate |
 
 **`min-height` set to `180px`** (not 220px as in earlier experimental versions).
 
@@ -213,6 +220,8 @@ Two changes were applied as a UI-only update without a version increment:
 | First-line on empty editor | `showOnFirstLine()` reads caret rect from live selection; falls back to `padding-top + lineHeight/2` |
 | Scroll compensation | Both `positionPlusBtn` and `showOnFirstLine` add `editor.scrollTop` to `top` offset |
 | `+` → `×` morph | CSS `transform: rotate(45deg)` on `.open` class |
+| Hover styling | `border-color: #1a1a18; color: #1a1a18` — black, no glow |
+| Active/open styling | `border-color: #1a1a18; color: #1a1a18` — black, no glow |
 | Menu open animation | `scaleX(0→1)`, `transform-origin: left center`, `cubic-bezier(0.22,1,0.36,1)` |
 | Focus preservation | `mousedown` + `e.preventDefault()` on all menu interactions |
 | Hidden by default | `opacity: 0; pointer-events: none` — `.visible` class enables it |
