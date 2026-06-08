@@ -1,7 +1,8 @@
 # Rich Text Editor — Project Documentation
 
 > **Single source of truth** for the custom Notion-like block-based rich text editor built for Bubble.io.  
-> Last updated: June 8, 2026 · Current source file: **huzlly_rich_editor_v8.html**
+> Last updated: June 8, 2026 · Current source file: **huzlly_rich_editor_v8.html**  
+> Patch applied: June 8, 2026 — Bug Fix 1 (inline toolbar adaptive placement + shape) & Bug Fix 2 (plus button first-line regression)
 
 ---
 
@@ -29,7 +30,7 @@ A **self-contained, single-file** HTML/CSS/JS snippet (`huzlly_rich_editor_v8.ht
 
 - A floating **Plus (+) button** that tracks the active cursor line and opens a contextual block-formatting menu.
 - A **horizontal block-type-only toolbar** (expandable from the `+` button) with CSS-only tooltips and a staggered left→right reveal animation. Inline formatting buttons have been fully removed from this menu.
-- A **contextual floating Inline Formatting Popover** (`#huz-inline-toolbar`) that appears dynamically above any non-collapsed text selection within the editor and hosts all inline formatting controls (Bold, Italic, Underline, Strikethrough, Clear Formatting).
+- A **contextual floating Inline Formatting Popover** (`#huz-inline-toolbar`) that appears dynamically above any non-collapsed text selection within the editor and hosts all inline formatting controls (Bold, Italic, Underline, Strikethrough, Clear Formatting). The toolbar uses **adaptive placement** — it flips below the selection when vertical space above is insufficient, and is horizontally clamped within the editor canvas bounds.
 - Full **Bubble.io Toolbox plugin** integration for real-time data sync.
 - **Secure initial content hydration** from Bubble dynamic data via a `data-initial-content` attribute.
 - **Borderless appearance** in all states — no wrapper border, no focus glow.
@@ -88,17 +89,44 @@ Active state (focus):
 
 `#huz-block-menu` uses `position: absolute` within `.huz-plus-col`. It is anchored at `left: 38px` (fixed in CSS — button right edge ~25px + ~13px gap) and its `top` is set dynamically by `setButtonTop()`. The menu uses `translateY(-50%)` as a static transform so its vertical midpoint aligns with the `+` button's center. The open/close animation is a staggered opacity + translateX reveal (not scaleX).
 
-### 3.4 Inline Toolbar Positioning Engine
+### 3.4 Inline Toolbar Adaptive Placement Engine (Bug Fix 1)
 
-`#huz-inline-toolbar` uses `position: fixed`. Its coordinates are derived from the live text selection's bounding rect, read via `window.getSelection().getRangeAt(0).getBoundingClientRect()`, which returns **viewport-relative** coordinates — correctly matching `position: fixed`. Placement is:
+`#huz-inline-toolbar` uses `position: fixed`. Its coordinates are derived from the live text selection's bounding rect via `window.getSelection().getRangeAt(0).getBoundingClientRect()`, which returns **viewport-relative** coordinates — correctly matching `position: fixed`.
+
+**Placement algorithm (revised):**
 
 ```
-toolbar.left  = selectionRect.left + selectionRect.width / 2   (centered over selection)
-toolbar.top   = selectionRect.top - toolbarHeight - GAP        (9px above selection)
-toolbar.transform = translateX(-50%)                           (center anchor)
+Step 1 — Read geometry:
+  selRect  = selection.getRangeAt(0).getBoundingClientRect()   // viewport-relative
+  edRect   = editor.getBoundingClientRect()                     // editor canvas bounds
+  tbW      = inlineToolbar.offsetWidth  || 200                  // actual rendered width
+  tbH      = inlineToolbar.offsetHeight || 38                   // actual rendered height
+
+Step 2 — Vertical: try above first, flip below if insufficient space:
+  topIfAbove = selRect.top - tbH - GAP (9px)
+  topIfBelow = selRect.bottom + GAP (9px)
+
+  if topIfAbove >= TOOLBAR_MIN_TOP_SPACE (10px):
+    top = topIfAbove  →  toolbar renders ABOVE selection
+    add class .above to #huz-inline-toolbar
+  else:
+    top = topIfBelow  →  toolbar renders BELOW selection
+    add class .below to #huz-inline-toolbar
+
+Step 3 — Horizontal: center over selection, clamp within editor bounds:
+  selCenterX = selRect.left + selRect.width / 2
+  left       = selCenterX - tbW / 2
+  minLeft    = edRect.left + 4
+  maxLeft    = edRect.right - tbW - 4
+  left       = clamp(left, minLeft, max(maxLeft, minLeft))
+
+Step 4 — Apply:
+  inlineToolbar.style.left = left + 'px'
+  inlineToolbar.style.top  = top  + 'px'
+  inlineToolbar.style.transform = 'translateY(0)'   (no translateX(-50%) — clamped already)
 ```
 
-A left-clamp (`Math.max(left, 80)`) prevents the toolbar from overflowing the left edge of the viewport. No right-clamp is applied in v8; can be added if very short viewports are a concern.
+The `.above` / `.below` CSS classes on `#huz-inline-toolbar` control tooltip arrow direction for `.huz-inline-btn::before` and `::after` pseudo-elements, so tooltips always point toward the text (away from the toolbar center), regardless of which direction the toolbar is placed.
 
 ### 3.5 Selection State Machine
 
@@ -107,8 +135,9 @@ No selection / collapsed caret:
   #huz-inline-toolbar  → opacity: 0; visibility: hidden; pointer-events: none
 
 Valid selection (non-collapsed, within #huz-editor, length > 0):
-  #huz-inline-toolbar  → positioned above selection rect
+  #huz-inline-toolbar  → adaptive placement above or below selection rect
                        → opacity: 1; visibility: visible; pointer-events: all
+                       → .above or .below class set for correct tooltip direction
                        → button .active states reflect current execCommand state
 
 Selection cleared / caret collapsed:
@@ -117,7 +146,32 @@ Selection cleared / caret collapsed:
 
 The 80ms debounce on hide prevents the toolbar from flickering during the `mousedown` → `mouseup` cycle when the user first clicks (briefly collapsing the selection before the new one forms).
 
-### 3.6 Cursor Rendering Pipeline (FOUC prevention)
+### 3.6 Plus Button Lifecycle — First-Line Fix (Bug Fix 2)
+
+The original `positionPlusBtn(null)` path hid the `+` button whenever `getActiveBlock()` returned `null`, regardless of whether the caret was actually inside the editor. This caused a regression on the first line: when the editor contains a bare text node (no wrapping `<p>`) or when the browser hasn't settled the selection at click time, `getActiveBlock()` legitimately returns `null` even though the caret is valid.
+
+**Revised lifecycle:**
+
+```
+onCursorMove / focus / click
+  → getActiveBlock()
+      ├── returns Element  → positionPlusBtn(element)   [normal path]
+      └── returns null
+            ├── isCaretInsideEditor() === false  → hide + button   [truly outside]
+            └── isCaretInsideEditor() === true   → showOnFirstLine()  [first-line fallback]
+
+focus event:
+  → setTimeout(..., 0) to allow browser selection to settle
+  → if getActiveBlock() returns null AND activeElement === editor → showOnFirstLine()
+
+click event:
+  → setTimeout(..., 0) for same reason
+  → if getActiveBlock() returns null AND isCaretInsideEditor() → showOnFirstLine()
+```
+
+`isCaretInsideEditor()` is a new helper that checks `editor.contains(sel.anchorNode)` — lightweight and called only in the null branch.
+
+### 3.7 Cursor Rendering Pipeline (FOUC prevention)
 
 1. Critical cursor CSS is placed **above** the `@import` in `<style>` — parsed synchronously before any network fetch starts.
 2. `style="cursor:text;color-scheme:light;"` is inlined on `.huz-wrap` and `#huz-editor` — applied by the HTML parser before the CSS engine runs.
@@ -230,7 +284,7 @@ The 80ms debounce on hide prevents the toolbar from flickering during the `mouse
 
 ---
 
-### v8 — Current Source (`huzlly_rich_editor_v8.html`)
+### v8 — (`huzlly_rich_editor_v8.html`)
 
 **Core change — decoupled inline formatting into selection-driven floating popover:**
 
@@ -253,56 +307,47 @@ Block menu stagger CSS reduced from 12 children to **8 children** (H1, H2, H3, s
 
 A brand-new floating element rendered **outside** `.huz-wrap` in the DOM (after the wrapper, before `</body>`) using `position: fixed`.
 
-**Markup:**
-```html
-<div id="huz-inline-toolbar" role="toolbar" aria-label="Inline formatting options">
-  <button class="huz-inline-btn" data-cmd="bold"          data-tip="Bold"><b>B</b></button>
-  <button class="huz-inline-btn" data-cmd="italic"        data-tip="Italic"><em>I</em></button>
-  <button class="huz-inline-btn" data-cmd="underline"     data-tip="Underline"><u>U</u></button>
-  <button class="huz-inline-btn" data-cmd="strikeThrough" data-tip="Strikethrough"><s>S</s></button>
-  <div class="huz-inline-sep"></div>
-  <button class="huz-inline-btn" id="huz-inline-clear"    data-tip="Clear Formatting">⌫</button>
-</div>
-```
+---
 
-**CSS design:**
+### v8 patch — June 8, 2026 (Bug Fix 1 + Bug Fix 2)
 
-| Property | Value | Rationale |
-|---|---|---|
-| `position` | `fixed` | Viewport coords — matches `getBoundingClientRect()` output; avoids clipping by `.huz-wrap` overflow |
-| `background` | `#ffffff` | Clean white popover surface |
-| `border` | `1px solid #E5E7EB` | Consistent with chip button borders |
-| `border-radius` | `999px` | Full pill — visually distinct from block menu's flat transparent strip |
-| `box-shadow` | `0 4px 16px rgba(0,0,0,0.10), 0 1px 4px rgba(0,0,0,0.06)` | Soft floating popover depth |
-| `padding` | `4px 6px` | Tight breathing room around buttons |
-| `gap` | `3px` | Compact chip spacing |
-| Default state | `opacity:0; visibility:hidden; pointer-events:none; transform:translateY(4px)` | Hidden; subtle enter from below |
-| `.visible` state | `opacity:1; visibility:visible; pointer-events:all; transform:translateY(0)` | Smooth 140ms fade+rise |
+#### Bug Fix 1: Inline Toolbar Adaptive Placement & Shape Correction
 
-**`.huz-inline-btn` styling:**
-Identical design language to `.huz-menu-btn` — pill chips (border-radius: 999px), white background, `1px solid #E5E7EB` border, `font-size: 11px`, `font-weight: 700`, `line-height: 1`, `padding-bottom: 1px`. Color: `var(--text-muted)` idle → `#1a1a18` hover → `#2563EB` active.
+**Problem:** `#huz-inline-toolbar` used a rigid placement formula that always positioned it a fixed distance above the selection rect. In Bubble iframes, this caused the toolbar to clip behind elements or overflow the top edge when text was selected near the top of the editor canvas.
 
-**Tooltip direction:** Appears **above** the buttons (since the toolbar floats above text), using `bottom: calc(100% + 7px)` with a downward-pointing arrow (`border-top-color`). This is intentionally inverted from `.huz-menu-btn` tooltips which appear below.
+Additionally, the toolbar used `border-radius: 999px` (full pill shape), which produced an unintended oval appearance at the toolbar's natural width.
 
-#### New JS: selection state machine
+**Changes:**
 
-Three new event listeners drive inline toolbar visibility:
+| Area | Change |
+|---|---|
+| `#huz-inline-toolbar` `border-radius` | `999px` → `8px` — soft rectangular card, not pill/oval |
+| `showInlineToolbar()` JS | Full rewrite — adaptive two-pass placement engine (see §3.4) |
+| `isValidEditorSelection()` | Unchanged |
+| New constants | `TOOLBAR_HEIGHT_APPROX = 38`, `TOOLBAR_GAP = 9`, `TOOLBAR_MIN_TOP_SPACE = 10` |
+| New CSS classes | `.above` (default, toolbar above text) and `.below` (flipped, toolbar below text) applied by JS to `#huz-inline-toolbar` |
+| Tooltip direction CSS | `.huz-inline-btn::after/::before` split into `#huz-inline-toolbar.above .huz-inline-btn::after/::before` and `#huz-inline-toolbar.below .huz-inline-btn::after/::before` — arrows always point toward selection regardless of flip state |
 
-1. `document.addEventListener('selectionchange', ...)` — primary driver; reacts to any selection change globally, filters to editor-contained selections.
-2. `editor.addEventListener('keyup', ...)` — catches shift+arrow keyboard selections (selectionchange alone can miss these in some browsers).
-3. `inlineToolbar.addEventListener('mousedown', ...)` — handles button clicks with `e.preventDefault()` to prevent selection loss.
+**Placement logic:**
+1. Reads `inlineToolbar.offsetWidth` / `offsetHeight` for actual rendered dimensions (falls back to constants before first render).
+2. Computes `topIfAbove = selRect.top - tbH - 9` and `topIfBelow = selRect.bottom + 9`.
+3. Places above if `topIfAbove >= 10` (10px from iframe top), otherwise flips below.
+4. Centers horizontally over selection, then clamps left within `[edRect.left + 4, edRect.right - tbW - 4]` — no more hard `Math.max(left, 80)` constant.
+5. Sets `transform: 'translateY(0)'` directly (no `translateX(-50%)` since left is pre-clamped).
 
-**`isValidEditorSelection()`** — gating function that returns `true` only when:
-- A `Selection` object exists with `rangeCount > 0`
-- `sel.isCollapsed === false`
-- `sel.toString().length > 0`
-- Both `sel.anchorNode` and `sel.focusNode` are within `#huz-editor`
+#### Bug Fix 2: Plus Button Drops Off on First-Line Click-Back
 
-**`showInlineToolbar()`** — calls `isValidEditorSelection()`, reads `getBoundingClientRect()`, computes `left` and `top`, clamps left to `≥ 80px`, sets `position:fixed` coords, calls `updateInlineBtnStates()`, adds `.visible`.
+**Problem:** When a user typed on the first editor line, changed focus, and clicked back onto that line, the `+` button disappeared and did not re-appear. Root cause: `getActiveBlock()` returned `null` for a bare text node or during the brief window between `click` and browser selection settlement, and `positionPlusBtn(null)` immediately called `plusBtn.classList.remove('visible')` when `document.activeElement !== editor` — which was always true at the exact moment of the `click` event, before focus had transferred.
 
-**`hideInlineToolbar()`** — removes `.visible`.
+**Changes:**
 
-**`scheduleHideInlineToolbar()`** — 80ms debounced hide, checking `isValidEditorSelection()` before acting. Prevents toolbar flicker during `mousedown → mouseup` cycles.
+| Area | Change |
+|---|---|
+| New helper `isCaretInsideEditor()` | Returns `editor.contains(sel.anchorNode)` — distinguishes "null because outside" from "null because first-line bare text" |
+| `positionPlusBtn(null)` | Now calls `isCaretInsideEditor()` instead of checking `document.activeElement`. If caret is inside editor → `showOnFirstLine()`; if outside → hide |
+| `focus` event listener | Wrapped in `setTimeout(..., 0)` to let browser settle selection. After timeout: if `getActiveBlock()` is null AND `document.activeElement === editor` → `showOnFirstLine()` |
+| `click` event listener | Same `setTimeout(..., 0)` guard. After timeout: if `getActiveBlock()` is null AND `isCaretInsideEditor()` → `showOnFirstLine()` |
+| `getActiveBlock()` | Added explicit comment: returns `null` for bare root-level text nodes; callers must use `isCaretInsideEditor()` to distinguish this from "truly outside editor" |
 
 ---
 
@@ -315,6 +360,8 @@ Three new event listeners drive inline toolbar visibility:
 | Tracks active line | `positionPlusBtn(block)` reads `getBoundingClientRect()` of active block element |
 | List item precision | If active block is `<ul>/<ol>`, walks selection anchor to nearest `<li>` for rect |
 | First-line on empty editor | `showOnFirstLine()` reads caret rect from live selection; falls back to `padding-top + lineHeight/2` |
+| First-line on populated editor (Bug Fix 2) | `isCaretInsideEditor()` check in `positionPlusBtn(null)` routes to `showOnFirstLine()` instead of hiding |
+| Click-back first-line fix (Bug Fix 2) | `setTimeout(..., 0)` in click/focus listeners allows selection to settle before evaluating |
 | Scroll compensation | Both `positionPlusBtn` and `showOnFirstLine` add `editor.scrollTop` to `top` offset |
 | `+` → `×` morph | CSS `transform: rotate(45deg)` on `.open` class |
 | Symbol size | `font-size: 19px`, `font-weight: 300` — larger symbol, button dimensions unchanged |
@@ -358,7 +405,7 @@ Three new event listeners drive inline toolbar visibility:
 
 ### 5.4 Inline Formatting Popover (`#huz-inline-toolbar`)
 
-The popover appears automatically when the user makes a non-collapsed text selection within `#huz-editor`. It floats centered above the selected text.
+The popover appears automatically when the user makes a non-collapsed text selection within `#huz-editor`. It floats centered above the selected text by default; if there is insufficient vertical clearance above, it flips below (see §3.4 for full algorithm).
 
 | Button | Command | `data-cmd` value |
 |---|---|---|
@@ -375,6 +422,10 @@ The popover appears automatically when the user makes a non-collapsed text selec
 - `Escape` key pressed in editor
 - Selection anchor/focus moves outside editor
 - Clear Formatting applied (selection collapses after removeFormat)
+
+**Placement direction:** `.above` class (default) → toolbar above selection, tooltips point up above buttons. `.below` class → toolbar below selection, tooltips point down below buttons. Both CSS rule sets coexist; JS toggles the class on every `showInlineToolbar()` call.
+
+**Shape:** `border-radius: 8px` — soft rectangular card. Individual buttons inside remain `border-radius: 999px` (pill chips) for design consistency with the block menu.
 
 **Button active state:** `.active` class (blue `#2563EB`, `#BFDBFE` border) applied via `updateInlineBtnStates()`, which queries `document.queryCommandState()` on open and after each command.
 
@@ -437,19 +488,29 @@ All defined in `:root`:
 Block menu left: 38px  (button right edge ~25px + ~13px visual gap)
 ```
 
-### 7.2 Inline Toolbar Geometry
+### 7.2 Inline Toolbar Geometry (Adaptive — Bug Fix 1)
 
 ```
-viewport
+viewport (iframe)
   ↑
-  ├──  [#huz-inline-toolbar]   ← position:fixed
-  │        centered over selection rect
-  │        top = selectionRect.top - ~38px (toolbar height) - 9px (GAP)
-  │        left = selectionRect.left + selectionRect.width/2 → clamped ≥ 80px
-  │        transform: translateX(-50%)
+  ├── [#huz-inline-toolbar class="above"]   ← default, position:fixed
+  │       left  = clamp(selCenterX - tbW/2,  edRect.left + 4,  edRect.right - tbW - 4)
+  │       top   = selRect.top - tbH - 9px
+  │       transform: translateY(0)           (no translateX — left is pre-clamped)
+  │       .above: tooltip arrows point UP above buttons
   │
-  └──  [selected text]         ← inside #huz-editor
+  └── [selected text]   ← inside #huz-editor
+  │
+  ├── [#huz-inline-toolbar class="below"]   ← flipped when topIfAbove < 10px
+  │       left  = same clamp formula
+  │       top   = selRect.bottom + 9px
+  │       .below: tooltip arrows point DOWN below buttons
+  │
+  └── [selected text]   ← same selection
 ```
+
+**Flip condition:** `selRect.top - tbH - 9 < 10` → flip to below.  
+**Horizontal clamp bounds:** `[edRect.left + 4px, edRect.right - tbW - 4px]`
 
 ### 7.3 Key Measurements
 
@@ -465,10 +526,13 @@ viewport
 | `.huz-wrap` | `min-height` | `180px` | Compact initial frame height |
 | `#huz-editor` | `min-height` | `180px` | Matches wrapper |
 | `.huz-wrap` | `border` | `none` | Borderless design — no idle or focus border |
-| `#huz-inline-toolbar` | `padding` | `4px 6px` | Tight breathing room inside pill |
+| `#huz-inline-toolbar` | `padding` | `4px 6px` | Tight breathing room inside card |
 | `#huz-inline-toolbar` | `gap` | `3px` | Compact chip spacing |
+| `#huz-inline-toolbar` | `border-radius` | `8px` | Soft rectangular card (Bug Fix 1 — was 999px pill) |
 | `.huz-inline-btn` | `width/height` | `28px / 26px` | Slightly smaller than `.huz-menu-btn` for compact popover |
-| Inline toolbar GAP | 9px | — | Comfortable vertical separation above selection |
+| Inline toolbar GAP | `9px` | — | Comfortable vertical separation from selection edge |
+| Inline toolbar MIN_TOP | `10px` | — | Minimum distance from iframe top edge before flipping below |
+| `TOOLBAR_HEIGHT_APPROX` | `38px` | — | Pre-render height estimate for flip-condition calculation |
 
 ---
 
@@ -494,7 +558,7 @@ Active / Focused state:
     ▼
 
 Selection state:
-  #huz-inline-toolbar → positioned above selection; opacity:1; visible; pointer-events:all
+  #huz-inline-toolbar → adaptively placed above or below selection; opacity:1; visible; pointer-events:all
 
     │  selection collapses or moves outside editor
     ▼
@@ -515,6 +579,9 @@ Back to Active / Focused state (inline toolbar hidden after 80ms debounce)
 | `savedRange` | `Range \| null` | Selection range saved on block menu open; restored before block insertions |
 | `saveTimer` | `number \| null` | Debounce timer ID for `syncToBubble()` |
 | `inlineHideTimer` | `number \| null` | Debounce timer ID for `scheduleHideInlineToolbar()` (80ms) |
+| `TOOLBAR_HEIGHT_APPROX` | `number` (const) | `38` — fallback toolbar height estimate used before first render |
+| `TOOLBAR_GAP` | `number` (const) | `9` — px gap between toolbar edge and selection edge |
+| `TOOLBAR_MIN_TOP_SPACE` | `number` (const) | `10` — minimum px from iframe top before flipping to below |
 
 ### 9.2 Functions
 
@@ -523,8 +590,9 @@ Back to Active / Focused state (inline toolbar hidden after 80ms debounce)
 | `init()` | Reads `data-initial-content`; injects into `#huz-editor` if not placeholder token and not empty |
 | `syncToBubble()` | Debounced 500ms call to `bubble_fn_saveEditorData(editor.innerHTML)` |
 | `syncNow()` | Immediate (non-debounced) save — called on `blur` |
-| `getActiveBlock()` | Walks selection anchor up to nearest direct child of `#huz-editor`; returns `null` if not inside editor |
-| `positionPlusBtn(block)` | Positions `+` button aligned to active block; resolves to `<li>` rect if inside a list; calls `showOnFirstLine()` if editor is focused but `block` is null |
+| `getActiveBlock()` | Walks selection anchor up to nearest direct child of `#huz-editor`; returns `null` if not inside editor OR if caret is on a bare root-level text node |
+| `isCaretInsideEditor()` | **New (Bug Fix 2)** — Returns `true` if `sel.anchorNode` is contained within `#huz-editor`. Distinguishes "null because outside" from "null because bare first-line text". |
+| `positionPlusBtn(block)` | Positions `+` button aligned to active block; resolves to `<li>` rect if inside a list; calls `showOnFirstLine()` if block is null AND caret is inside editor (Bug Fix 2) |
 | `showOnFirstLine()` | Positions `+` button using live caret `getBoundingClientRect()`; falls back to `padding-top + lineHeight/2` |
 | `setButtonTop(px)` | Sets `plusBtn.style.top = px + 'px'`; sets `blockMenu.style.top = (px + 11) + 'px'` |
 | `openMenu()` | Saves current selection to `savedRange`; adds `.open` to block menu and button |
@@ -534,7 +602,7 @@ Back to Active / Focused state (inline toolbar hidden after 80ms debounce)
 | `insertAfter(node, ref)` | DOM helper — inserts `node` after `ref` inside `#huz-editor`; appends if no ref |
 | `placeCursorIn(el)` | Places collapsed selection at first text node inside `el` |
 | `isValidEditorSelection()` | Returns `true` if current selection is non-collapsed, has string length > 0, and both anchor/focus nodes are inside `#huz-editor` |
-| `showInlineToolbar()` | Validates selection, reads bounding rect, computes fixed coords, adds `.visible` to `#huz-inline-toolbar`, calls `updateInlineBtnStates()` |
+| `showInlineToolbar()` | **Revised (Bug Fix 1)** — Validates selection; reads `offsetWidth`/`offsetHeight` of toolbar; computes adaptive above/below placement; clamps left within editor bounds; sets `.above` or `.below` class; adds `.visible`. See §3.4 for full algorithm. |
 | `hideInlineToolbar()` | Removes `.visible` from `#huz-inline-toolbar` |
 | `scheduleHideInlineToolbar()` | 80ms debounced call to `hideInlineToolbar()` — prevents flicker during mousedown/mouseup cycles |
 | `updateInlineBtnStates()` | Reflects `bold`/`italic`/`underline`/`strikeThrough` command state onto `.active` class of `.huz-inline-btn` buttons |
@@ -577,7 +645,9 @@ syncNow() → bubble_fn_saveEditorData(editor.innerHTML)
 
 ### 10.4 Note on `position: fixed` inside Bubble iframes
 
-`#huz-inline-toolbar` uses `position: fixed`. In Bubble, HTML Elements are rendered inside iframes. `position: fixed` is resolved against the **iframe's viewport**, not the outer page viewport. This is correct behavior: the toolbar will always appear within the HTML Element's iframe frame, anchored above the selected text. No special configuration is needed.
+`#huz-inline-toolbar` uses `position: fixed`. In Bubble, HTML Elements are rendered inside iframes. `position: fixed` is resolved against the **iframe's viewport**, not the outer page viewport. This is correct behavior: the toolbar will always appear within the HTML Element's iframe frame, anchored above (or below, if flipped) the selected text. No special configuration is needed.
+
+The adaptive placement engine (Bug Fix 1) uses `TOOLBAR_MIN_TOP_SPACE = 10px` as its flip threshold against the iframe top edge — this correctly handles short editors near the top of the Bubble page where the toolbar would otherwise clip behind the iframe boundary.
 
 ---
 
@@ -600,6 +670,9 @@ syncNow() → bubble_fn_saveEditorData(editor.innerHTML)
 | 13 | Clicking a format button collapsed the selection | `mousedown` on toolbar triggered blur/selection-loss on editor | `e.preventDefault()` on `inlineToolbar.addEventListener('mousedown', ...)` (v8) |
 | 14 | Inline toolbar clipped by `.huz-wrap` overflow | `position: fixed` inside a positioned overflow ancestor is clipped | Moved `#huz-inline-toolbar` outside `.huz-wrap` in DOM; `position: fixed` now resolves to iframe viewport (v8) |
 | 15 | Inline toolbar tooltip arrows pointed wrong direction | Block menu tooltips point up (below icon); inline toolbar sits above text, so tooltip should appear above buttons | Inverted tooltip CSS on `.huz-inline-btn`: `bottom: calc(100% + 7px)` + `border-top-color` downward arrow (v8) |
+| 16 | Inline toolbar clips or hides behind adjacent elements near editor top boundary | Rigid `top = selRect.top - toolbarHeight - GAP` formula had no floor check; toolbar overflowed iframe top when selection was on the first one or two lines | Adaptive two-pass placement: compute `topIfAbove`; if `< TOOLBAR_MIN_TOP_SPACE (10px)`, flip to `topIfBelow = selRect.bottom + GAP`. Adds `.above`/`.below` class to toolbar; tooltip CSS keys off these classes for correct arrow direction. Horizontal position clamped within `[edRect.left + 4, edRect.right - tbW - 4]` using editor's live client rect instead of a hard `Math.max(left, 80)` constant. (v8 patch — June 8, 2026) |
+| 17 | Inline toolbar displayed as oval pill instead of clean rounded card | `border-radius: 999px` on `#huz-inline-toolbar` produced an oval at the toolbar's natural width | Changed `border-radius` to `8px` — soft rectangular card shape. Individual `.huz-inline-btn` chips retain `border-radius: 999px`. (v8 patch — June 8, 2026) |
+| 18 | `+` button disappears after user types on first line, changes focus, and clicks back | `positionPlusBtn(null)` checked `document.activeElement !== editor` (always true at click time before focus settles) and hid the button. `getActiveBlock()` returns `null` for bare root-level text nodes, so the button was permanently suppressed on first-line plain text. | Added `isCaretInsideEditor()` helper. `positionPlusBtn(null)` now calls `isCaretInsideEditor()` — if inside, routes to `showOnFirstLine()` instead of hiding. `focus` and `click` listeners wrapped in `setTimeout(..., 0)` to allow browser selection to settle before evaluating block position. (v8 patch — June 8, 2026) |
 
 ---
 
@@ -613,8 +686,9 @@ syncNow() → bubble_fn_saveEditorData(editor.innerHTML)
 - The entire JS is wrapped in an IIFE to avoid polluting global scope inside Bubble's iframe.
 - Inline SVG is used for list icons (bullet + numbered) to ensure crisp rendering at all DPR values and consistent cross-browser appearance.
 - Block menu open animation is CSS-only: staggered `transition-delay` on each `#huz-block-menu > *` child, stepping by 22ms from left to right.
-- Inline toolbar show/hide is CSS transition-driven (opacity + visibility + translateY); JS only adds/removes the `.visible` class.
+- Inline toolbar show/hide is CSS transition-driven (opacity + visibility + translateY); JS only adds/removes the `.visible` class and the `.above`/`.below` direction class.
 - `selectionchange` is the primary event for inline toolbar state. `keyup` with shift detection handles keyboard-extended selections as a supplement.
+- `setTimeout(..., 0)` is used in `focus` and `click` handlers to defer block resolution until the browser has settled the new selection/caret position. This is the standard pattern for `contenteditable` event timing.
 
 ---
 
@@ -634,13 +708,18 @@ syncNow() → bubble_fn_saveEditorData(editor.innerHTML)
 - [ ] Verify hovering the rotated `×` darkens the icon correctly
 - [ ] Verify block menu chips reveal left→right with stagger on open
 - [ ] Verify block menu contains **only** H1, H2, H3, Bullet, Numbered, Divider — no inline format buttons
-- [ ] Select text and verify inline toolbar appears centered above the selection
+- [ ] Select text and verify inline toolbar appears **above** the selection (default)
+- [ ] Select text on the **first line** (near editor top) and verify inline toolbar flips **below** the selection
+- [ ] Verify inline toolbar is a **soft rounded rectangle** (8px radius), not an oval or pill
+- [ ] Verify tooltip arrows on inline toolbar buttons point **toward the selected text** (up when above, down when below)
 - [ ] Verify inline toolbar Bold/Italic/Underline/Strikethrough apply formatting correctly
 - [ ] Verify `.active` (blue) state on inline buttons reflects current format state accurately
 - [ ] Verify Clear Formatting (⌫) removes all inline styles from selected text
 - [ ] Verify clicking an inline toolbar button does NOT collapse the text selection
 - [ ] Verify inline toolbar hides when caret collapses (click without drag, arrow keys)
 - [ ] Verify `Escape` hides both the block menu and inline toolbar
+- [ ] Type text on the first line, click away, then click back onto line one — verify `+` button reappears correctly
+- [ ] Repeat the above test with a single short word on line one (bare text node edge case)
 - [ ] Verify Quote, Code Block, Alignment buttons, and inline format buttons are absent from the block menu
 
 ---
