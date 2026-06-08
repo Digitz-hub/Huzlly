@@ -122,8 +122,7 @@
   }
 
   /* ─────────────────────────────────────────────────────────────────
-     Block menu — structural blocks only (no inline format buttons)
-     Child count after cleanup: H1, H2, H3, sep, UL, OL, HR = 7 items + 1 sep = 8 children
+     Block menu
   ───────────────────────────────────────────────────────────────── */
   #huz-block-menu {
     position: absolute;
@@ -156,7 +155,6 @@
                 visibility 0s linear 0s;
   }
 
-  /* Staggered reveal — 8 children max (H1, H2, H3, sep, UL, OL, —, sep) */
   #huz-block-menu > * {
     opacity: 0;
     transform: translateX(-6px);
@@ -171,7 +169,6 @@
   #huz-block-menu.open > *:nth-child(7) { opacity: 1; transform: translateX(0); transition-delay: 92ms;  }
   #huz-block-menu.open > *:nth-child(8) { opacity: 1; transform: translateX(0); transition-delay: 104ms; }
 
-  /* Thin vertical separator */
   .huz-menu-sep {
     width: 1px;
     height: 18px;
@@ -182,7 +179,7 @@
   }
 
   /* ─────────────────────────────────────────────────────────────────
-     Block menu buttons — structural blocks only
+     Block menu buttons
   ───────────────────────────────────────────────────────────────── */
   .huz-menu-btn {
     position: relative;
@@ -212,7 +209,6 @@
     border-color: #E5E7EB;
   }
 
-  /* Tooltip label — appears BELOW button */
   .huz-menu-btn::after {
     content: attr(data-tip);
     position: absolute;
@@ -260,7 +256,10 @@
 
   /* ═══════════════════════════════════════════════════════════════════
      INLINE FORMATTING POPOVER — #huz-inline-toolbar
-     Floats above selected text. Position driven by JS.
+     BUG FIX 1: border-radius changed from 999px to 8px (soft card, not pill).
+     Position is now adaptive — JS places it above OR below the selection
+     depending on available vertical space, and clamps horizontally to the
+     editor's client rect so it never clips outside the canvas.
   ═══════════════════════════════════════════════════════════════════ */
   #huz-inline-toolbar {
     position: fixed;
@@ -271,11 +270,11 @@
     padding: 4px 6px;
     background: #ffffff;
     border: 1px solid #E5E7EB;
-    border-radius: 999px;
+    /* BUG FIX 1 — visual shape: soft rectangular card, not oval pill */
+    border-radius: 8px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.10), 0 1px 4px rgba(0, 0, 0, 0.06);
     z-index: 9999;
     white-space: nowrap;
-    /* Hidden by default */
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
@@ -295,7 +294,46 @@
                 transform 0.14s ease;
   }
 
-  /* Thin vertical separator inside inline toolbar */
+  /*
+   * BUG FIX 1 — adaptive tooltip direction:
+   * When toolbar is above text (.above), tooltip appears above button (bottom: ...).
+   * When toolbar is below text (.below), tooltip appears below button (top: ...).
+   * Default class is .above; JS sets .below when the toolbar flips.
+   */
+  #huz-inline-toolbar.above .huz-inline-btn::after {
+    bottom: calc(100% + 7px);
+    top: auto;
+    transform: translateX(-50%) translateY(4px);
+  }
+  #huz-inline-toolbar.above .huz-inline-btn::before {
+    bottom: calc(100% + 2px);
+    top: auto;
+    transform: translateX(-50%) translateY(4px);
+    border-top-color: var(--tooltip-bg);
+    border-bottom-color: transparent;
+  }
+  #huz-inline-toolbar.above .huz-inline-btn:hover::after,
+  #huz-inline-toolbar.above .huz-inline-btn:hover::before {
+    transform: translateX(-50%) translateY(0);
+  }
+
+  #huz-inline-toolbar.below .huz-inline-btn::after {
+    top: calc(100% + 7px);
+    bottom: auto;
+    transform: translateX(-50%) translateY(-4px);
+  }
+  #huz-inline-toolbar.below .huz-inline-btn::before {
+    top: calc(100% + 2px);
+    bottom: auto;
+    transform: translateX(-50%) translateY(-4px);
+    border-bottom-color: var(--tooltip-bg);
+    border-top-color: transparent;
+  }
+  #huz-inline-toolbar.below .huz-inline-btn:hover::after,
+  #huz-inline-toolbar.below .huz-inline-btn:hover::before {
+    transform: translateX(-50%) translateY(0);
+  }
+
   .huz-inline-sep {
     width: 1px;
     height: 16px;
@@ -306,7 +344,7 @@
   }
 
   /* ─────────────────────────────────────────────────────────────────
-     Inline toolbar buttons — identical design language to .huz-menu-btn
+     Inline toolbar buttons
   ───────────────────────────────────────────────────────────────── */
   .huz-inline-btn {
     position: relative;
@@ -342,13 +380,11 @@
     border-color: #BFDBFE;
   }
 
-  /* Tooltip — appears ABOVE the inline toolbar (since toolbar is above selection) */
+  /* Base tooltip rules — direction determined by parent .above/.below class */
   .huz-inline-btn::after {
     content: attr(data-tip);
     position: absolute;
-    bottom: calc(100% + 7px);
     left: 50%;
-    transform: translateX(-50%) translateY(4px);
     background: var(--tooltip-bg);
     color: #fff;
     font-size: 10px;
@@ -362,19 +398,25 @@
     transition: opacity 0.14s ease, transform 0.14s ease;
     z-index: 200;
   }
-  /* Arrow pointing DOWN (toward the button) */
   .huz-inline-btn::before {
     content: '';
     position: absolute;
-    bottom: calc(100% + 2px);
     left: 50%;
-    transform: translateX(-50%) translateY(4px);
     border: 4px solid transparent;
-    border-top-color: var(--tooltip-bg);
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.14s ease, transform 0.14s ease;
     z-index: 200;
+  }
+  /* Default state (above) — these are overridden by the .above / .below rules above */
+  .huz-inline-btn::after {
+    bottom: calc(100% + 7px);
+    transform: translateX(-50%) translateY(4px);
+  }
+  .huz-inline-btn::before {
+    bottom: calc(100% + 2px);
+    transform: translateX(-50%) translateY(4px);
+    border-top-color: var(--tooltip-bg);
   }
   .huz-inline-btn:hover::after,
   .huz-inline-btn:hover::before {
@@ -462,8 +504,7 @@
 
       <!--
         Block menu — structural blocks only.
-        Inline formatting has been moved to #huz-inline-toolbar (selection-driven).
-        Children: H1, H2, H3, sep, UL, OL, — = 7 items (+ 1 sep = 8 total children for stagger)
+        Inline formatting lives in #huz-inline-toolbar (selection-driven).
       -->
       <div id="huz-block-menu" role="toolbar" aria-label="Block type options">
 
@@ -511,10 +552,12 @@
 
 <!--
   Floating inline formatting toolbar.
-  Rendered outside .huz-wrap so it can use position:fixed without clipping.
-  Shown/hidden + positioned entirely by JS based on text selection state.
+  Rendered outside .huz-wrap so position:fixed resolves to the iframe viewport,
+  preventing any clipping from .huz-wrap overflow.
+  BUG FIX 1: border-radius is now 8px (soft card). JS placement is adaptive —
+  flips below the selection when there is insufficient space above.
 -->
-<div id="huz-inline-toolbar" role="toolbar" aria-label="Inline formatting options">
+<div id="huz-inline-toolbar" role="toolbar" aria-label="Inline formatting options" class="above">
   <button class="huz-inline-btn" data-cmd="bold"          data-tip="Bold"><b>B</b></button>
   <button class="huz-inline-btn" data-cmd="italic"        data-tip="Italic"><em>I</em></button>
   <button class="huz-inline-btn" data-cmd="underline"     data-tip="Underline"><u>U</u></button>
@@ -539,7 +582,12 @@
   let menuOpen         = false;
   let savedRange       = null;
   let saveTimer        = null;
-  let inlineHideTimer  = null;   // debounce for hiding the inline toolbar
+  let inlineHideTimer  = null;
+
+  /* ── Inline toolbar measured height (used for adaptive placement) */
+  const TOOLBAR_HEIGHT_APPROX = 38;   // px; approximate before first render
+  const TOOLBAR_GAP           = 9;    // px gap between toolbar edge and selection edge
+  const TOOLBAR_MIN_TOP_SPACE = 10;   // minimum px from iframe top edge before flipping
 
   /* ══════════════════════════════════════════════════════════════
      INIT — hydrate editor from data-initial-content attribute
@@ -572,23 +620,55 @@
 
   /* ══════════════════════════════════════════════════════════════
      GET ACTIVE BLOCK
+     BUG FIX 2: Returns the direct child of #huz-editor that contains
+     the caret. Works correctly for both element nodes AND raw text
+     nodes on the first line (walks parentNode until it finds a direct
+     child of editor, regardless of node type).
   ══════════════════════════════════════════════════════════════ */
   function getActiveBlock () {
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return null;
+
     let node = sel.anchorNode;
-    while (node && node.parentNode !== editor) node = node.parentNode;
-    return (node && node !== editor) ? node : null;
+
+    // Walk up to a direct child of #huz-editor
+    while (node && node !== editor) {
+      if (node.parentNode === editor) return node;
+      node = node.parentNode;
+    }
+
+    // Caret is directly inside #huz-editor (e.g. bare text node at root level)
+    // This can happen when the editor has raw text without a wrapper element.
+    // Return null here — positionPlusBtn will call showOnFirstLine() as fallback.
+    return null;
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     IS CARET INSIDE EDITOR
+     BUG FIX 2: Used to distinguish "null because outside editor" from
+     "null because bare text in editor" so we know whether to show the
+     + button or hide it.
+  ══════════════════════════════════════════════════════════════ */
+  function isCaretInsideEditor () {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    const node = sel.anchorNode;
+    return node ? editor.contains(node) : false;
   }
 
   /* ══════════════════════════════════════════════════════════════
      POSITION PLUS BUTTON
+     BUG FIX 2: If getActiveBlock() returns null but the caret IS
+     inside the editor (e.g. first-line plain text, or bare text node),
+     always fall through to showOnFirstLine() instead of hiding.
   ══════════════════════════════════════════════════════════════ */
   function positionPlusBtn (block) {
     if (!block) {
-      if (document.activeElement !== editor) {
+      // BUG FIX 2: only hide when caret is definitively outside the editor
+      if (!isCaretInsideEditor()) {
         if (!menuOpen) plusBtn.classList.remove('visible');
       } else {
+        // Caret is inside editor but no resolvable block — use first-line fallback
         showOnFirstLine();
       }
       return;
@@ -675,7 +755,7 @@
   });
 
   /* ══════════════════════════════════════════════════════════════
-     BLOCK MENU — mousedown handler (structural blocks only)
+     BLOCK MENU — mousedown handler
   ══════════════════════════════════════════════════════════════ */
   blockMenu.addEventListener('mousedown', function (e) {
     e.preventDefault();
@@ -691,19 +771,22 @@
   });
 
   /* ══════════════════════════════════════════════════════════════
-     INLINE TOOLBAR — selection-driven positioning & state machine
+     INLINE TOOLBAR — adaptive placement engine
+     BUG FIX 1: The toolbar now evaluates available space above the
+     selection against the editor's client rect and the iframe top edge.
+     If there is insufficient room (< TOOLBAR_HEIGHT_APPROX + TOOLBAR_GAP
+     + TOOLBAR_MIN_TOP_SPACE px), it flips to render BELOW the selection.
+     The horizontal position is clamped within the editor's visible
+     client rect so the toolbar never overflows left or right.
+     The .above / .below CSS classes on the toolbar control tooltip
+     arrow direction to match the flip state.
   ══════════════════════════════════════════════════════════════ */
 
-  /**
-   * Determines whether the current selection is a valid non-collapsed
-   * text selection entirely within #huz-editor.
-   */
   function isValidEditorSelection () {
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
     if (sel.toString().length === 0) return false;
 
-    // Verify both anchor and focus are inside the editor
     const anchor = sel.anchorNode;
     const focus  = sel.focusNode;
     if (!editor.contains(anchor) || !editor.contains(focus)) return false;
@@ -712,9 +795,14 @@
   }
 
   /**
-   * Positions and shows the inline toolbar centered above the selection rect.
-   * Uses position:fixed + getBoundingClientRect (viewport coords) so it works
-   * correctly inside Bubble's iframe regardless of page scroll.
+   * Adaptive placement:
+   * 1. Read the selection bounding rect (viewport-relative, matches position:fixed).
+   * 2. Read the editor bounding rect for horizontal clamping.
+   * 3. Determine actual rendered toolbar dimensions via offsetWidth/offsetHeight
+   *    (falls back to TOOLBAR_HEIGHT_APPROX if not yet rendered).
+   * 4. Try to place ABOVE. If the computed top would go off-screen or overlap the
+   *    iframe top edge by less than TOOLBAR_MIN_TOP_SPACE, flip to BELOW.
+   * 5. Clamp left to keep the toolbar within the editor's horizontal bounds.
    */
   function showInlineToolbar () {
     if (!isValidEditorSelection()) {
@@ -722,38 +810,66 @@
       return;
     }
 
-    const sel  = window.getSelection();
-    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    const sel     = window.getSelection();
+    const selRect = sel.getRangeAt(0).getBoundingClientRect();
+    const edRect  = editor.getBoundingClientRect();
 
-    // Toolbar dimensions (approximate before render; 8px gap above selection)
-    const toolbarHeight = 38;   // approximate; actual may vary by 2-4px
-    const GAP           = 9;    // px gap between toolbar bottom and selection top
+    // Use actual rendered dimensions when available
+    const tbW = inlineToolbar.offsetWidth  || 200;
+    const tbH = inlineToolbar.offsetHeight || TOOLBAR_HEIGHT_APPROX;
 
-    // Center horizontally over selection, clamp within viewport
-    let left = rect.left + (rect.width / 2);
-    let top  = rect.top - toolbarHeight - GAP;
+    // ── Vertical placement ──────────────────────────────────────────
+    const topIfAbove = selRect.top - tbH - TOOLBAR_GAP;
+    const topIfBelow = selRect.bottom + TOOLBAR_GAP;
 
-    // Clamp: prevent going off left edge
-    left = Math.max(left, 80);
+    let top;
+    let placedAbove;
 
-    inlineToolbar.style.left = left + 'px';
-    inlineToolbar.style.top  = top  + 'px';
-    inlineToolbar.style.transform = 'translateX(-50%) translateY(0)';
+    if (topIfAbove >= TOOLBAR_MIN_TOP_SPACE) {
+      // Enough room above — preferred position
+      top = topIfAbove;
+      placedAbove = true;
+    } else {
+      // Not enough room above — flip below
+      top = topIfBelow;
+      placedAbove = false;
+    }
+
+    // ── Horizontal placement ────────────────────────────────────────
+    // Center over the selection, then clamp within the editor's client rect.
+    // Left edge must be at least edRect.left + 4px from the editor start.
+    // Right edge must not exceed edRect.right - 4px.
+    const selCenterX = selRect.left + selRect.width / 2;
+    let left = selCenterX - tbW / 2;
+
+    const minLeft = edRect.left + 4;
+    const maxLeft = edRect.right - tbW - 4;
+
+    left = Math.max(left, minLeft);
+    left = Math.min(left, Math.max(maxLeft, minLeft)); // keep min as floor even if editor is very narrow
+
+    // ── Apply position ──────────────────────────────────────────────
+    inlineToolbar.style.left      = left + 'px';
+    inlineToolbar.style.top       = top  + 'px';
+    inlineToolbar.style.transform = 'translateY(0)';
+
+    // Toggle direction class for tooltip arrow CSS
+    if (placedAbove) {
+      inlineToolbar.classList.remove('below');
+      inlineToolbar.classList.add('above');
+    } else {
+      inlineToolbar.classList.remove('above');
+      inlineToolbar.classList.add('below');
+    }
 
     updateInlineBtnStates();
     inlineToolbar.classList.add('visible');
   }
 
-  /**
-   * Hides the inline toolbar.
-   */
   function hideInlineToolbar () {
     inlineToolbar.classList.remove('visible');
   }
 
-  /**
-   * Debounced hide — prevents flickering during rapid mousedown → mouseup cycles.
-   */
   function scheduleHideInlineToolbar () {
     clearTimeout(inlineHideTimer);
     inlineHideTimer = setTimeout(function () {
@@ -763,11 +879,9 @@
 
   /* Listen for selection changes anywhere in the document */
   document.addEventListener('selectionchange', function () {
-    // Only react to selections within our editor
     const sel = window.getSelection();
     if (!sel) return;
 
-    // Check if selection involves the editor at all
     const anchor = sel.anchorNode;
     if (anchor && editor.contains(anchor)) {
       if (sel.isCollapsed || sel.toString().length === 0) {
@@ -777,14 +891,12 @@
         showInlineToolbar();
       }
     } else {
-      // Selection moved outside editor — hide
       scheduleHideInlineToolbar();
     }
   });
 
-  /* Also catch keyboard-extended selections */
+  /* Catch keyboard-extended selections */
   editor.addEventListener('keyup', function (e) {
-    // Shift + arrows / Home / End / etc. can create selections via keyboard
     if (e.shiftKey || e.key === 'Home' || e.key === 'End') {
       if (isValidEditorSelection()) {
         showInlineToolbar();
@@ -796,10 +908,8 @@
 
   /* ──────────────────────────────────────────────────────────────
      Inline toolbar button interactions
-     mousedown + preventDefault preserves the active selection range.
   ─────────────────────────────────────────────────────────────── */
   inlineToolbar.addEventListener('mousedown', function (e) {
-    // Prevent focus loss from the editor so selection is preserved
     e.preventDefault();
 
     const btn       = e.target.closest('.huz-inline-btn');
@@ -811,7 +921,6 @@
       document.execCommand('removeFormat', false, null);
       updateInlineBtnStates();
       syncToBubble();
-      // Selection is likely collapsed after clear — hide toolbar
       scheduleHideInlineToolbar();
       return;
     }
@@ -914,6 +1023,10 @@
 
   /* ══════════════════════════════════════════════════════════════
      EDITOR EVENT LISTENERS
+     BUG FIX 2: onCursorMove now calls isCaretInsideEditor() before
+     deciding to hide the + button. If getActiveBlock() returns null
+     but the caret is still inside the editor, positionPlusBtn(null)
+     will call showOnFirstLine() rather than hiding.
   ══════════════════════════════════════════════════════════════ */
 
   function onCursorMove () {
@@ -925,16 +1038,32 @@
   editor.addEventListener('mouseup', onCursorMove);
 
   editor.addEventListener('focus', function () {
+    // BUG FIX 2: Use a short setTimeout to allow the browser to settle the
+    // selection/caret after focus events. Without this, getActiveBlock() can
+    // return null because anchorNode is not yet set, causing positionPlusBtn
+    // to hide the button incorrectly.
     setTimeout(function () {
       activeBlock = getActiveBlock();
-      positionPlusBtn(activeBlock);
+      // If block is null but focus is confirmed on the editor, force showOnFirstLine
+      if (!activeBlock && document.activeElement === editor) {
+        showOnFirstLine();
+      } else {
+        positionPlusBtn(activeBlock);
+      }
     }, 0);
   });
 
   editor.addEventListener('click', function () {
+    // BUG FIX 2: Same setTimeout guard as focus — click events fire before
+    // the selection is updated in some browsers, causing a transient null
+    // from getActiveBlock() on the very first line.
     setTimeout(function () {
       activeBlock = getActiveBlock();
-      positionPlusBtn(activeBlock);
+      if (!activeBlock && isCaretInsideEditor()) {
+        showOnFirstLine();
+      } else {
+        positionPlusBtn(activeBlock);
+      }
     }, 0);
   });
 
@@ -945,10 +1074,7 @@
   });
 
   editor.addEventListener('blur', function (e) {
-    // Don't close block menu if focus is moving into the menus
     if (blockMenu.contains(e.relatedTarget) || e.relatedTarget === plusBtn) return;
-    // Don't hide inline toolbar if focus moves to inline toolbar (mousedown prevented default so this
-    // shouldn't fire, but guard here for safety)
     if (inlineToolbar.contains(e.relatedTarget)) return;
 
     plusBtn.classList.remove('visible');
@@ -979,7 +1105,6 @@
       }
     }
 
-    // Any non-modifier keydown while no shift = likely navigation, hide toolbar
     if (!e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(e.key)) {
         scheduleHideInlineToolbar();
