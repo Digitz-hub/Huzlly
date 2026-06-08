@@ -13,20 +13,13 @@
 <style>
   /* ═══════════════════════════════════════════════════════════════════
      PERF FIX — CRITICAL CURSOR RULES (must stay BEFORE @import)
-     Browsers process @import as a network-blocking sub-request.
-     Any rule written after @import cannot be parsed until that fetch
-     resolves, causing FOUC on cursor/color-scheme properties.
-     By placing these rules here — above the @import line — the browser
-     applies them on the very first synchronous CSS parse pass, with
-     zero dependency on external font downloads.
   ═══════════════════════════════════════════════════════════════════ */
   .huz-wrap,
   .huz-editor-body,
   #huz-editor {
-    cursor: text;        /* I-beam locked from first paint */
-    color-scheme: light; /* OS always renders dark I-beam on light canvas */
+    cursor: text;
+    color-scheme: light;
   }
-  /* Restore correct pointer for interactive controls inside the wrap */
   #huz-plus-btn,
   .huz-menu-btn,
   #huz-clear-fmt {
@@ -55,71 +48,55 @@
     --t:           0.15s ease;
   }
 
-  /* ─────────────────────────────────────────────────────────────────
-     LAYOUT CHANGE: Wrapper is fully borderless in all states.
-     border and box-shadow removed entirely; no transition needed.
-     overflow-x:hidden / overflow-y:auto retained for scroll + resize.
-  ───────────────────────────────────────────────────────────────── */
   .huz-wrap {
     position: relative;
     font-family: var(--font-body);
     color: var(--text);
     background: var(--bg);
-    border: none;           /* CHANGED: was "1.5px solid var(--border)" — border removed */
+    border: none;
     border-radius: var(--radius);
-    resize: vertical;       /* single native resize handle */
-    overflow-x: hidden;     /* suppress horizontal bar */
-    overflow-y: auto;       /* vertical scroll when content overflows */
+    resize: vertical;
+    overflow-x: hidden;
+    overflow-y: auto;
     min-height: 180px;
-    /* CHANGED: transition removed — no border-color or box-shadow to animate */
   }
-  /* CHANGED: :focus-within block removed entirely — no focus border, no glow */
 
-  /* Inner body fills the wrapper height */
   .huz-editor-body {
     display: flex;
-    min-height: inherit; /* stretches with wrapper when resized */
+    min-height: inherit;
   }
 
-  /* ── Plus button column ──────────────────────────────────────────
-     GEOMETRY CHANGE (see §7 of docs for full derivation):
-       Old: 44px column, button at left:11px
-       New: 22px column, button at left:0px  (flush to left wall)
-     Button right edge = 0 + 22 = 22px from container wall.
-     Gap to menu and to text = 10px each.
-     Menu left = 22 + 10 = 32px.
-     Text start = column(22px) + editor padding-left(10px) = 32px.
-  ─────────────────────────────────────────────────────────────── */
   .huz-plus-col {
-    width: 22px;            /* CHANGED: was 44px — now matches button width exactly */
+    width: 22px;
     flex-shrink: 0;
     position: relative;
   }
 
   /* ─────────────────────────────────────────────────────────────────
-     Floating + / × toggle button
+     Plus button: 3px left offset for border breathing room.
+     [CHANGE 1D] font-size increased from 16px to 19px for larger symbol.
+     [CHANGE 1B/C] hover on open state darkens icon; idle open state stays --plus-idle.
   ───────────────────────────────────────────────────────────────── */
   #huz-plus-btn {
     position: absolute;
-    left: 0;                /* CHANGED: was 11px — now flush to left wall of column */
+    left: 3px;
     width: 22px;
     height: 22px;
     border-radius: 50%;
     border: 1.5px solid var(--plus-idle);
     background: #fff;
     color: var(--plus-idle);
-    font-size: 16px;
-    font-weight: 400;
+    font-size: 19px;           /* [1D] was 16px — larger symbol, same button size */
+    font-weight: 300;          /* lighter weight so enlarged size stays visually balanced */
     line-height: 1;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    /* BUG FIX 1: starts invisible but positioned; JS shows it on focus */
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.12s ease, border-color 0.15s ease,
-                color 0.15s ease,           /* CHANGED: box-shadow 0.15s removed — no glow to animate */
+    transition: opacity 0.12s ease,
+                color 0.15s ease,
                 transform 0.2s ease;
     z-index: 20;
     user-select: none;
@@ -129,102 +106,138 @@
     opacity: 1;
     pointer-events: all;
   }
-  #huz-plus-btn.open {
-    border-color: #1a1a18;   /* CHANGED: was var(--plus-active) purple — now black */
-    color: #1a1a18;          /* CHANGED: was var(--plus-active) purple — now black */
-                             /* CHANGED: box-shadow removed — no glow in open state */
-    transform: rotate(45deg); /* + morphs into × — unchanged */
-  }
+
+  /* [1A] Hover when closed: border unchanged, icon darkens */
   #huz-plus-btn:hover:not(.open) {
-    border-color: #1a1a18;   /* CHANGED: was var(--plus-active) purple — now black */
-    color: #1a1a18;          /* CHANGED: was var(--plus-active) purple — now black */
-                             /* CHANGED: box-shadow removed — no glow on hover */
+    border-color: var(--plus-idle);
+    color: #1a1a18;
+  }
+
+  /* [1C] Open (idle): border and icon both unchanged from default */
+  #huz-plus-btn.open {
+    border-color: var(--plus-idle);
+    color: var(--plus-idle);
+    transform: rotate(45deg);   /* + → × */
+  }
+
+  /* [1B] Open + hovered: icon darkens, border still unchanged */
+  #huz-plus-btn.open:hover {
+    border-color: var(--plus-idle);
+    color: #1a1a18;
   }
 
   /* ─────────────────────────────────────────────────────────────────
-     Horizontal icon-only menu bar, slides left → right.
-     GEOMETRY CHANGE:
-       Old: left:49px  (btn right 33px + 16px gap)
-       New: left:32px  (btn right 22px + 10px gap)
-     translateY(-50%) vertical centering unchanged.
+     Block menu: transparent wrapper, no bg/border/shadow.
+     [CHANGE 2] left pushed from 32px → 38px (+6px gap between btn and menu).
+     [CHANGE 6] Replaced scaleX animation with staggered fade+slide reveal.
   ───────────────────────────────────────────────────────────────── */
   #huz-block-menu {
     position: absolute;
-    left: 32px;                /* CHANGED: was 49px — now btn right edge (22px) + 10px gap */
-    top: 0;                    /* JS sets this dynamically — see setButtonTop() */
-    transform: scaleX(0) translateX(-8px) translateY(-50%);
-    display: flex;             /* HORIZONTAL layout */
+    left: 38px;                /* [2] was 32px — 6px more gap from plus button */
+    top: 0;
+    display: flex;
     flex-direction: row;
     align-items: center;
-    gap: 2px;
-    padding: 5px 6px;
-    background: #fff;
-    border: 1.5px solid var(--border);
-    border-radius: 10px;
-    box-shadow: var(--menu-shadow);
+    gap: 4px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
     z-index: 100;
     white-space: nowrap;
-    /* Hidden / closed state */
+    /* [6] Closed state: hidden via visibility, opacity fades out */
     visibility: hidden;
-    transform-origin: left center;
     opacity: 0;
-    transition: transform 0.22s cubic-bezier(0.22,1,0.36,1),
-                opacity   0.18s ease,
-                visibility 0s linear 0.22s;
+    transform: translateY(-50%);   /* vertical centering — static, not animated */
+    transform-origin: left center;
+    transition: opacity 0.18s ease,
+                visibility 0s linear 0.18s;
     pointer-events: none;
   }
   #huz-block-menu.open {
     visibility: visible;
-    transform: scaleX(1) translateX(0) translateY(-50%);
     opacity: 1;
     pointer-events: all;
-    transition: transform 0.22s cubic-bezier(0.22,1,0.36,1),
-                opacity   0.18s ease,
+    transition: opacity 0.18s ease,
                 visibility 0s linear 0s;
   }
 
-  /* Thin vertical separator inside the menu */
+  /* ─────────────────────────────────────────────────────────────────
+     [CHANGE 6] Staggered reveal: each child animates in from left
+     Closed → children shifted left and invisible.
+     Open   → children slide to natural position and fade in.
+     nth-child delays create the left→right stagger.
+  ───────────────────────────────────────────────────────────────── */
+  #huz-block-menu > * {
+    opacity: 0;
+    transform: translateX(-6px);
+    transition: opacity 0.18s ease, transform 0.18s ease;
+  }
+  #huz-block-menu.open > *:nth-child(1)  { opacity: 1; transform: translateX(0); transition-delay: 0ms;   }
+  #huz-block-menu.open > *:nth-child(2)  { opacity: 1; transform: translateX(0); transition-delay: 22ms;  }
+  #huz-block-menu.open > *:nth-child(3)  { opacity: 1; transform: translateX(0); transition-delay: 44ms;  }
+  #huz-block-menu.open > *:nth-child(4)  { opacity: 1; transform: translateX(0); transition-delay: 56ms;  }
+  #huz-block-menu.open > *:nth-child(5)  { opacity: 1; transform: translateX(0); transition-delay: 68ms;  }
+  #huz-block-menu.open > *:nth-child(6)  { opacity: 1; transform: translateX(0); transition-delay: 80ms;  }
+  #huz-block-menu.open > *:nth-child(7)  { opacity: 1; transform: translateX(0); transition-delay: 92ms;  }
+  #huz-block-menu.open > *:nth-child(8)  { opacity: 1; transform: translateX(0); transition-delay: 104ms; }
+  #huz-block-menu.open > *:nth-child(9)  { opacity: 1; transform: translateX(0); transition-delay: 116ms; }
+  #huz-block-menu.open > *:nth-child(10) { opacity: 1; transform: translateX(0); transition-delay: 128ms; }
+  #huz-block-menu.open > *:nth-child(11) { opacity: 1; transform: translateX(0); transition-delay: 140ms; }
+  #huz-block-menu.open > *:nth-child(12) { opacity: 1; transform: translateX(0); transition-delay: 152ms; }
+
+  /* Thin vertical separator */
   .huz-menu-sep {
     width: 1px;
     height: 18px;
     background: var(--border);
-    margin: 0 3px;
+    margin: 0 2px;
     flex-shrink: 0;
+    opacity: 0.6;
   }
 
   /* ─────────────────────────────────────────────────────────────────
-     Icon-only menu buttons with CSS tooltip
-     Tooltips render BELOW (bottom) each button, not above.
+     Menu buttons: individual chips, pill shape, white bg.
+     [CHANGE 4] Added padding-bottom: 1px for optical vertical centering.
+     line-height: 1 prevents font descenders pushing icon low.
   ───────────────────────────────────────────────────────────────── */
   .huz-menu-btn {
-    position: relative;          /* tooltip anchor */
+    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 30px;
     height: 28px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
+    border: 1px solid #E5E7EB;
+    border-radius: 999px;
+    background: #ffffff;
     cursor: pointer;
     font-size: 11px;
     font-weight: 700;
     font-family: var(--font-body);
+    line-height: 1;              /* [4] prevents line-height pushing icons down */
     color: var(--text-muted);
-    transition: background var(--t), color var(--t);
+    transition: color var(--t);
     user-select: none;
     flex-shrink: 0;
-  }
-  .huz-menu-btn:hover {
-    background: var(--accent-soft);
-    color: var(--accent);
-  }
-  .huz-menu-btn.active {
-    background: var(--accent-soft);
-    color: var(--accent);
+    /* [4] slight upward nudge compensates for DM Sans cap-height offset */
+    padding-bottom: 1px;
   }
 
-  /* Tooltip label — appears BELOW button (top: 100% + offset) */
+  .huz-menu-btn:hover {
+    background: #ffffff;
+    color: #1a1a18;
+    border-color: #E5E7EB;
+  }
+
+  .huz-menu-btn.active {
+    background: #ffffff;
+    color: #2563EB;
+    border-color: #E5E7EB;
+  }
+
+  /* Tooltip label — appears BELOW button */
   .huz-menu-btn::after {
     content: attr(data-tip);
     position: absolute;
@@ -244,7 +257,7 @@
     transition: opacity 0.14s ease, transform 0.14s ease;
     z-index: 200;
   }
-  /* Arrow — points UP (border-bottom-color), sits above tooltip label */
+  /* Arrow — points UP */
   .huz-menu-btn::before {
     content: '';
     position: absolute;
@@ -264,28 +277,27 @@
     transform: translateX(-50%) translateY(0);
   }
 
-  /* ─────────────────────────────────────────────────────────────────
-     Left padding geometry (all measurements from wrapper left wall):
-       .huz-plus-col right edge  =  22px  (CHANGED: was 44px)
-       #huz-plus-btn right edge  =  0 + 22 = 22px  (CHANGED: was 33px)
-       #huz-editor text start    =  22px col + 10px pad = 32px  (CHANGED: was 49px)
-       Gap btn right→text start  =  32px - 22px = 10px  ✓ (CHANGED: was 16px)
-       Gap btn right→menu left   =  32px - 22px = 10px  ✓ (CHANGED: was 16px)
-     Top / right / bottom padding unchanged at 16px.
-  ───────────────────────────────────────────────────────────────── */
+  /* [CHANGE 5] List icon SVGs — inline, sized to fit chip */
+  .huz-menu-btn svg {
+    width: 14px;
+    height: 14px;
+    display: block;
+    flex-shrink: 0;
+  }
+
   #huz-editor {
     flex: 1;
     outline: none;
-    padding: 16px 16px 16px 10px; /* CHANGED: left was 5px — now 10px (col 22px + 10px = 32px text start) */
+    padding: 16px 16px 16px 10px;
     font-size: 15px;
     line-height: 1.75;
     color: var(--text);
     font-family: var(--font-body);
     word-break: break-word;
     min-height: 180px;
-    caret-color: #1a1a18;          /* solid dark blinking caret */
-    cursor: text;                  /* lock pointer to I-beam */
-    color-scheme: light;           /* force browser/OS to render dark I-beam on light canvas */
+    caret-color: #1a1a18;
+    cursor: text;
+    color-scheme: light;
   }
   #huz-editor:empty::before {
     content: attr(data-placeholder);
@@ -358,15 +370,35 @@
       <div id="huz-block-menu" role="toolbar" aria-label="Block & format options">
 
         <!-- Block types -->
-        <button class="huz-menu-btn" data-block="h1"          data-tip="Heading 1">H1</button>
-        <button class="huz-menu-btn" data-block="h2"          data-tip="Heading 2">H2</button>
-        <button class="huz-menu-btn" data-block="h3"          data-tip="Heading 3">H3</button>
+        <button class="huz-menu-btn" data-block="h1"  data-tip="Heading 1">H1</button>
+        <button class="huz-menu-btn" data-block="h2"  data-tip="Heading 2">H2</button>
+        <button class="huz-menu-btn" data-block="h3"  data-tip="Heading 3">H3</button>
         <div class="huz-menu-sep"></div>
-        <button class="huz-menu-btn" data-block="ul"          data-tip="Bullet List" style="font-size:14px;">•</button>
-        <button class="huz-menu-btn" data-block="ol"          data-tip="Numbered List" style="font-size:13px;">1.</button>
-        <button class="huz-menu-btn" data-block="blockquote"  data-tip="Quote" style="font-size:14px;">❝</button>
-        <button class="huz-menu-btn" data-block="pre"         data-tip="Code Block" style="font-size:10px;">&lt;/&gt;</button>
-        <button class="huz-menu-btn" data-block="hr"          data-tip="Divider" style="font-size:14px; letter-spacing:-1px;">—</button>
+        <!-- [CHANGE 5] Bullet list: inline SVG three-line list icon -->
+        <button class="huz-menu-btn" data-block="ul" data-tip="Bullet List">
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="2.5" cy="4.5" r="1.2" fill="currentColor"/>
+            <circle cx="2.5" cy="8"   r="1.2" fill="currentColor"/>
+            <circle cx="2.5" cy="11.5" r="1.2" fill="currentColor"/>
+            <line x1="5.5" y1="4.5" x2="13.5" y2="4.5"  stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="5.5" y1="8"   x2="13.5" y2="8"    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="5.5" y1="11.5" x2="13.5" y2="11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <!-- [CHANGE 5] Numbered list: inline SVG numbered-line list icon -->
+        <button class="huz-menu-btn" data-block="ol" data-tip="Numbered List">
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <text x="1" y="5.5" font-size="4.5" font-weight="700" fill="currentColor" font-family="sans-serif">1.</text>
+            <text x="1" y="9.5" font-size="4.5" font-weight="700" fill="currentColor" font-family="sans-serif">2.</text>
+            <text x="1" y="13.5" font-size="4.5" font-weight="700" fill="currentColor" font-family="sans-serif">3.</text>
+            <line x1="7" y1="4.5"  x2="14" y2="4.5"  stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="7" y1="8.5"  x2="14" y2="8.5"  stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="7" y1="12.5" x2="14" y2="12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <!-- [CHANGE 3A] blockquote removed -->
+        <!-- [CHANGE 3B] pre/code-block removed -->
+        <button class="huz-menu-btn" data-block="hr" data-tip="Divider" style="font-size:14px; letter-spacing:-1px;">—</button>
         <div class="huz-menu-sep"></div>
 
         <!-- Inline formats -->
@@ -376,14 +408,10 @@
         <button class="huz-menu-btn" data-cmd="strikeThrough" data-tip="Strikethrough"><s>S</s></button>
         <div class="huz-menu-sep"></div>
 
-        <!-- Align -->
-        <button class="huz-menu-btn" data-cmd="justifyLeft"   data-tip="Align Left"   style="font-size:13px;">⬅</button>
-        <button class="huz-menu-btn" data-cmd="justifyCenter" data-tip="Center"        style="font-size:13px;">⬌</button>
-        <button class="huz-menu-btn" data-cmd="justifyRight"  data-tip="Align Right"   style="font-size:13px;">➡</button>
-        <div class="huz-menu-sep"></div>
+        <!-- [CHANGE 7] Alignment buttons removed entirely -->
 
         <!-- Clear -->
-        <button class="huz-menu-btn" id="huz-clear-fmt"       data-tip="Clear Formatting" style="font-size:13px;">⌫</button>
+        <button class="huz-menu-btn" id="huz-clear-fmt" data-tip="Clear Formatting" style="font-size:13px;">⌫</button>
 
       </div>
     </div>
@@ -419,7 +447,6 @@
 
   /* ══════════════════════════════════════════════════════════════
      INIT — hydrate editor from data-initial-content attribute
-     Reads the Bubble-rendered attribute and safely sets innerHTML.
   ══════════════════════════════════════════════════════════════ */
   function init () {
     const raw = editor.getAttribute('data-initial-content') || '';
@@ -430,7 +457,6 @@
 
   /* ══════════════════════════════════════════════════════════════
      BUBBLE SYNC
-     Debounced 500ms on input; immediate on blur.
   ══════════════════════════════════════════════════════════════ */
   function syncToBubble () {
     clearTimeout(saveTimer);
@@ -450,8 +476,6 @@
 
   /* ══════════════════════════════════════════════════════════════
      GET ACTIVE BLOCK
-     Walks the selection anchor up to the nearest direct child of
-     #huz-editor. Returns null if cursor is not inside the editor.
   ══════════════════════════════════════════════════════════════ */
   function getActiveBlock () {
     const sel = window.getSelection();
@@ -463,18 +487,6 @@
 
   /* ══════════════════════════════════════════════════════════════
      POSITION PLUS BUTTON
-     
-     Root cause of the "first line" bug (retained from v3):
-       • On first focus/click the editor may be empty (no child nodes),
-         OR the cursor sits in a raw text node — getActiveBlock() null.
-     
-     List item alignment (v4):
-       • When the cursor is inside a <li>, `block` is the parent <ul>/<ol>
-         (the direct child of #huz-editor). Using its full rect centers
-         the + button on the entire list — visually wrong for multi-line lists.
-       • Fix: After finding the top-level block, also walk the selection
-         up to the nearest <li> if one exists inside that block.
-         If an <li> is found, use ITS bounding rect for centering.
   ══════════════════════════════════════════════════════════════ */
   function positionPlusBtn (block) {
     if (!block) {
@@ -488,7 +500,6 @@
 
     const edRect = editor.getBoundingClientRect();
 
-    /* Resolve to <li> level when inside a list */
     let targetRect = block.getBoundingClientRect();
     if (block.nodeName === 'UL' || block.nodeName === 'OL') {
       const sel = window.getSelection();
@@ -508,13 +519,6 @@
     plusBtn.classList.add('visible');
   }
 
-  /*
-    Fallback: position the + button at the first line of the editor.
-    We create a temporary range at the very start of the editor's
-    content, measure its bounding rect, then use that to align.
-    Includes editor.scrollTop so the button stays correct when the
-    user has scrolled down inside the editor.
-  */
   function showOnFirstLine () {
     const sel = window.getSelection();
     let top;
@@ -539,9 +543,6 @@
 
   function setButtonTop (px) {
     plusBtn.style.top   = px + 'px';
-    /* Menu uses translateY(-50%) in CSS, so point its `top` to the CENTER
-       of the plus button (px + half button height = px + 11) so the menu's
-       vertical midpoint aligns exactly with the button's. */
     blockMenu.style.top = (px + 11) + 'px';
   }
 
@@ -566,14 +567,12 @@
     plusBtn.setAttribute('aria-expanded', 'false');
   }
 
-  /* Plus button mousedown toggle (mousedown to avoid stealing editor focus) */
   plusBtn.addEventListener('mousedown', function (e) {
     e.preventDefault();
     e.stopPropagation();
     menuOpen ? closeMenu() : openMenu();
   });
 
-  /* Close on outside click */
   document.addEventListener('click', function (e) {
     if (menuOpen && !blockMenu.contains(e.target) && e.target !== plusBtn) {
       closeMenu();
@@ -612,7 +611,6 @@
       document.execCommand(cmd, false, null);
       updateInlineBtnStates();
       syncToBubble();
-      /* Keep menu open so user can chain multiple formats */
     }
   });
 
@@ -644,14 +642,8 @@
       }
       placeCursorIn(li);
 
-    } else if (type === 'pre') {
-      const pre = document.createElement('pre');
-      pre.innerHTML = '<br>';
-      insertAfter(pre, cur);
-      placeCursorIn(pre);
-
     } else {
-      /* p, h1, h2, h3, blockquote */
+      /* p, h1, h2, h3 */
       if (cur && cur.parentNode === editor) {
         const el = document.createElement(type);
         el.innerHTML = cur.innerHTML || '<br>';
@@ -703,7 +695,6 @@
     sel.addRange(range);
   }
 
-  /* Reflect bold/italic/underline/strike onto inline buttons */
   function updateInlineBtnStates () {
     ['bold','italic','underline','strikeThrough'].forEach(function (cmd) {
       const btn = blockMenu.querySelector('[data-cmd="' + cmd + '"]');
@@ -743,7 +734,6 @@
     syncToBubble();
   });
 
-  /* Blur: immediate sync; hide button only if focus left the whole component */
   editor.addEventListener('blur', function (e) {
     if (blockMenu.contains(e.relatedTarget) || e.relatedTarget === plusBtn) return;
     plusBtn.classList.remove('visible');
