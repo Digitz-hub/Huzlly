@@ -1,0 +1,789 @@
+<!--
+  ╔══════════════════════════════════════════════════════════════════════╗
+  ║   HUZLLY — Notion-Style Rich Text Editor for Bubble.io  v7           ║
+  ║   Paste this entire snippet into a Bubble HTML Element.             ║
+  ║   Requires: Toolbox Plugin (bubble_fn_saveEditorData)               ║
+  ║                                                                      ║
+  ║   BUBBLE SETUP:                                                      ║
+  ║   Replace #BUBBLE_DYNAMIC_DATA# with your Bubble dynamic expression ║
+  ║   e.g. data-initial-content="[Current page Note's Body]"            ║
+  ╚══════════════════════════════════════════════════════════════════════╝
+-->
+
+<style>
+  /* ═══════════════════════════════════════════════════════════════════
+     PERF FIX — CRITICAL CURSOR RULES (must stay BEFORE @import)
+     Browsers process @import as a network-blocking sub-request.
+     Any rule written after @import cannot be parsed until that fetch
+     resolves, causing FOUC on cursor/color-scheme properties.
+     By placing these rules here — above the @import line — the browser
+     applies them on the very first synchronous CSS parse pass, with
+     zero dependency on external font downloads.
+  ═══════════════════════════════════════════════════════════════════ */
+  .huz-wrap,
+  .huz-editor-body,
+  #huz-editor {
+    cursor: text;        /* I-beam locked from first paint */
+    color-scheme: light; /* OS always renders dark I-beam on light canvas */
+  }
+  /* Restore correct pointer for interactive controls inside the wrap */
+  #huz-plus-btn,
+  .huz-menu-btn,
+  #huz-clear-fmt {
+    cursor: pointer;
+  }
+
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:          #ffffff;
+    --surface:     #f7f7f5;
+    --border:      #e8e8e4;
+    --text:        #1a1a18;
+    --text-muted:  #9b9b97;
+    --accent:      #534AB7;
+    --accent-soft: #eeecfb;
+    --plus-idle:   #c7c7c2;
+    --plus-active: #534AB7;
+    --menu-shadow: 0 6px 28px rgba(0,0,0,0.10), 0 1.5px 5px rgba(0,0,0,0.06);
+    --tooltip-bg:  #1a1a18;
+    --radius:      8px;
+    --font-body:   'DM Sans', system-ui, sans-serif;
+    --font-mono:   'JetBrains Mono', 'Fira Mono', monospace;
+    --t:           0.15s ease;
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     LAYOUT CHANGE: Wrapper is fully borderless in all states.
+     border and box-shadow removed entirely; no transition needed.
+     overflow-x:hidden / overflow-y:auto retained for scroll + resize.
+  ───────────────────────────────────────────────────────────────── */
+  .huz-wrap {
+    position: relative;
+    font-family: var(--font-body);
+    color: var(--text);
+    background: var(--bg);
+    border: none;           /* CHANGED: was "1.5px solid var(--border)" — border removed */
+    border-radius: var(--radius);
+    resize: vertical;       /* single native resize handle */
+    overflow-x: hidden;     /* suppress horizontal bar */
+    overflow-y: auto;       /* vertical scroll when content overflows */
+    min-height: 180px;
+    /* CHANGED: transition removed — no border-color or box-shadow to animate */
+  }
+  /* CHANGED: :focus-within block removed entirely — no focus border, no glow */
+
+  /* Inner body fills the wrapper height */
+  .huz-editor-body {
+    display: flex;
+    min-height: inherit; /* stretches with wrapper when resized */
+  }
+
+  /* ── Plus button column ──────────────────────────────────────────
+     GEOMETRY CHANGE (see §7 of docs for full derivation):
+       Old: 44px column, button at left:11px
+       New: 22px column, button at left:0px  (flush to left wall)
+     Button right edge = 0 + 22 = 22px from container wall.
+     Gap to menu and to text = 10px each.
+     Menu left = 22 + 10 = 32px.
+     Text start = column(22px) + editor padding-left(10px) = 32px.
+  ─────────────────────────────────────────────────────────────── */
+  .huz-plus-col {
+    width: 22px;            /* CHANGED: was 44px — now matches button width exactly */
+    flex-shrink: 0;
+    position: relative;
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     Floating + / × toggle button
+  ───────────────────────────────────────────────────────────────── */
+  #huz-plus-btn {
+    position: absolute;
+    left: 0;                /* CHANGED: was 11px — now flush to left wall of column */
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1.5px solid var(--plus-idle);
+    background: #fff;
+    color: var(--plus-idle);
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* BUG FIX 1: starts invisible but positioned; JS shows it on focus */
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease, border-color 0.15s ease,
+                color 0.15s ease, box-shadow 0.15s ease,
+                transform 0.2s ease;
+    z-index: 20;
+    user-select: none;
+    transform: rotate(0deg);
+  }
+  #huz-plus-btn.visible {
+    opacity: 1;
+    pointer-events: all;
+  }
+  #huz-plus-btn.open {
+    border-color: var(--plus-active);
+    color: var(--plus-active);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+    transform: rotate(45deg); /* + morphs into × */
+  }
+  #huz-plus-btn:hover:not(.open) {
+    border-color: var(--plus-active);
+    color: var(--plus-active);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     Horizontal icon-only menu bar, slides left → right.
+     GEOMETRY CHANGE:
+       Old: left:49px  (btn right 33px + 16px gap)
+       New: left:32px  (btn right 22px + 10px gap)
+     translateY(-50%) vertical centering unchanged.
+  ───────────────────────────────────────────────────────────────── */
+  #huz-block-menu {
+    position: absolute;
+    left: 32px;                /* CHANGED: was 49px — now btn right edge (22px) + 10px gap */
+    top: 0;                    /* JS sets this dynamically — see setButtonTop() */
+    transform: scaleX(0) translateX(-8px) translateY(-50%);
+    display: flex;             /* HORIZONTAL layout */
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    padding: 5px 6px;
+    background: #fff;
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--menu-shadow);
+    z-index: 100;
+    white-space: nowrap;
+    /* Hidden / closed state */
+    visibility: hidden;
+    transform-origin: left center;
+    opacity: 0;
+    transition: transform 0.22s cubic-bezier(0.22,1,0.36,1),
+                opacity   0.18s ease,
+                visibility 0s linear 0.22s;
+    pointer-events: none;
+  }
+  #huz-block-menu.open {
+    visibility: visible;
+    transform: scaleX(1) translateX(0) translateY(-50%);
+    opacity: 1;
+    pointer-events: all;
+    transition: transform 0.22s cubic-bezier(0.22,1,0.36,1),
+                opacity   0.18s ease,
+                visibility 0s linear 0s;
+  }
+
+  /* Thin vertical separator inside the menu */
+  .huz-menu-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border);
+    margin: 0 3px;
+    flex-shrink: 0;
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     Icon-only menu buttons with CSS tooltip
+     Tooltips render BELOW (bottom) each button, not above.
+  ───────────────────────────────────────────────────────────────── */
+  .huz-menu-btn {
+    position: relative;          /* tooltip anchor */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 28px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+    font-family: var(--font-body);
+    color: var(--text-muted);
+    transition: background var(--t), color var(--t);
+    user-select: none;
+    flex-shrink: 0;
+  }
+  .huz-menu-btn:hover {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .huz-menu-btn.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  /* Tooltip label — appears BELOW button (top: 100% + offset) */
+  .huz-menu-btn::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 7px);
+    left: 50%;
+    transform: translateX(-50%) translateY(-4px);
+    background: var(--tooltip-bg);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    padding: 3px 7px;
+    border-radius: 5px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.14s ease, transform 0.14s ease;
+    z-index: 200;
+  }
+  /* Arrow — points UP (border-bottom-color), sits above tooltip label */
+  .huz-menu-btn::before {
+    content: '';
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%) translateY(-4px);
+    border: 4px solid transparent;
+    border-bottom-color: var(--tooltip-bg);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.14s ease, transform 0.14s ease;
+    z-index: 200;
+  }
+  .huz-menu-btn:hover::after,
+  .huz-menu-btn:hover::before {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  /* ─────────────────────────────────────────────────────────────────
+     Left padding geometry (all measurements from wrapper left wall):
+       .huz-plus-col right edge  =  22px  (CHANGED: was 44px)
+       #huz-plus-btn right edge  =  0 + 22 = 22px  (CHANGED: was 33px)
+       #huz-editor text start    =  22px col + 10px pad = 32px  (CHANGED: was 49px)
+       Gap btn right→text start  =  32px - 22px = 10px  ✓ (CHANGED: was 16px)
+       Gap btn right→menu left   =  32px - 22px = 10px  ✓ (CHANGED: was 16px)
+     Top / right / bottom padding unchanged at 16px.
+  ───────────────────────────────────────────────────────────────── */
+  #huz-editor {
+    flex: 1;
+    outline: none;
+    padding: 16px 16px 16px 10px; /* CHANGED: left was 5px — now 10px (col 22px + 10px = 32px text start) */
+    font-size: 15px;
+    line-height: 1.75;
+    color: var(--text);
+    font-family: var(--font-body);
+    word-break: break-word;
+    min-height: 180px;
+    caret-color: #1a1a18;          /* solid dark blinking caret */
+    cursor: text;                  /* lock pointer to I-beam */
+    color-scheme: light;           /* force browser/OS to render dark I-beam on light canvas */
+  }
+  #huz-editor:empty::before {
+    content: attr(data-placeholder);
+    color: var(--text-muted);
+    pointer-events: none;
+    user-select: none;
+  }
+
+  /* ── Block styles ── */
+  #huz-editor h1 { font-size: 1.75em; font-weight: 700; line-height: 1.2; margin: 8px 0 4px; }
+  #huz-editor h2 { font-size: 1.3em;  font-weight: 600; line-height: 1.3; margin: 6px 0 3px; }
+  #huz-editor h3 { font-size: 1.1em;  font-weight: 600; line-height: 1.4; margin: 4px 0 2px; }
+  #huz-editor ul, #huz-editor ol { padding-left: 1.5em; margin: 2px 0; }
+  #huz-editor li { margin: 2px 0; }
+  #huz-editor blockquote {
+    border-left: 3px solid var(--accent);
+    padding-left: 12px;
+    color: var(--text-muted);
+    font-style: italic;
+    margin: 4px 0;
+  }
+  #huz-editor code {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: var(--font-mono);
+    font-size: 0.87em;
+  }
+  #huz-editor pre {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    border-radius: var(--radius);
+    padding: 12px 15px;
+    font-family: var(--font-mono);
+    font-size: 0.84em;
+    overflow-x: auto;
+    margin: 6px 0;
+    white-space: pre;
+  }
+  #huz-editor hr { border: none; border-top: 1.5px solid var(--border); margin: 10px 0; }
+  #huz-editor p  { margin: 0; }
+  #huz-editor b, #huz-editor strong { font-weight: 600; }
+  #huz-editor em { font-style: italic; }
+  #huz-editor u  { text-decoration: underline; }
+  #huz-editor s  { text-decoration: line-through; color: var(--text-muted); }
+</style>
+
+<!-- ─── MARKUP ──────────────────────────────────────────────────────────── -->
+<!--
+  BUBBLE: Replace #BUBBLE_DYNAMIC_DATA# with your dynamic expression.
+  e.g. data-initial-content="[Current page Note's Body]"
+-->
+<div class="huz-wrap" id="huz-wrap" style="cursor:text;color-scheme:light;">
+  <div class="huz-editor-body">
+
+    <!-- Left column: plus button + horizontal icon menu -->
+    <div class="huz-plus-col">
+
+      <!-- + / × toggle -->
+      <button id="huz-plus-btn" aria-label="Insert block" aria-expanded="false">+</button>
+
+      <!--
+        Horizontal icon-only menu.
+        Each .huz-menu-btn carries:
+          data-block  → block insertion/conversion
+          data-cmd    → execCommand (inline formatting)
+          data-tip    → tooltip text shown on hover (CSS ::after)
+      -->
+      <div id="huz-block-menu" role="toolbar" aria-label="Block & format options">
+
+        <!-- Block types -->
+        <button class="huz-menu-btn" data-block="h1"          data-tip="Heading 1">H1</button>
+        <button class="huz-menu-btn" data-block="h2"          data-tip="Heading 2">H2</button>
+        <button class="huz-menu-btn" data-block="h3"          data-tip="Heading 3">H3</button>
+        <div class="huz-menu-sep"></div>
+        <button class="huz-menu-btn" data-block="ul"          data-tip="Bullet List" style="font-size:14px;">•</button>
+        <button class="huz-menu-btn" data-block="ol"          data-tip="Numbered List" style="font-size:13px;">1.</button>
+        <button class="huz-menu-btn" data-block="blockquote"  data-tip="Quote" style="font-size:14px;">❝</button>
+        <button class="huz-menu-btn" data-block="pre"         data-tip="Code Block" style="font-size:10px;">&lt;/&gt;</button>
+        <button class="huz-menu-btn" data-block="hr"          data-tip="Divider" style="font-size:14px; letter-spacing:-1px;">—</button>
+        <div class="huz-menu-sep"></div>
+
+        <!-- Inline formats -->
+        <button class="huz-menu-btn" data-cmd="bold"          data-tip="Bold"><b>B</b></button>
+        <button class="huz-menu-btn" data-cmd="italic"        data-tip="Italic"><em>I</em></button>
+        <button class="huz-menu-btn" data-cmd="underline"     data-tip="Underline"><u>U</u></button>
+        <button class="huz-menu-btn" data-cmd="strikeThrough" data-tip="Strikethrough"><s>S</s></button>
+        <div class="huz-menu-sep"></div>
+
+        <!-- Align -->
+        <button class="huz-menu-btn" data-cmd="justifyLeft"   data-tip="Align Left"   style="font-size:13px;">⬅</button>
+        <button class="huz-menu-btn" data-cmd="justifyCenter" data-tip="Center"        style="font-size:13px;">⬌</button>
+        <button class="huz-menu-btn" data-cmd="justifyRight"  data-tip="Align Right"   style="font-size:13px;">➡</button>
+        <div class="huz-menu-sep"></div>
+
+        <!-- Clear -->
+        <button class="huz-menu-btn" id="huz-clear-fmt"       data-tip="Clear Formatting" style="font-size:13px;">⌫</button>
+
+      </div>
+    </div>
+
+    <!-- Main editable area -->
+    <div
+      id="huz-editor"
+      contenteditable="true"
+      spellcheck="true"
+      data-placeholder="Write something… or click + to insert a block"
+      data-initial-content="#BUBBLE_DYNAMIC_DATA#"
+      style="cursor:text;color-scheme:light;"
+    ></div>
+
+  </div>
+</div>
+
+<!-- ─── JAVASCRIPT ─────────────────────────────────────────────────────── -->
+<script>
+(function () {
+  'use strict';
+
+  /* ── DOM refs ─────────────────────────────────────────────────── */
+  const editor    = document.getElementById('huz-editor');
+  const plusBtn   = document.getElementById('huz-plus-btn');
+  const blockMenu = document.getElementById('huz-block-menu');
+
+  /* ── State ────────────────────────────────────────────────────── */
+  let activeBlock = null;
+  let menuOpen    = false;
+  let savedRange  = null;
+  let saveTimer   = null;
+
+  /* ══════════════════════════════════════════════════════════════
+     INIT — hydrate editor from data-initial-content attribute
+     Reads the Bubble-rendered attribute and safely sets innerHTML.
+  ══════════════════════════════════════════════════════════════ */
+  function init () {
+    const raw = editor.getAttribute('data-initial-content') || '';
+    if (raw && raw !== '#BUBBLE_DYNAMIC_DATA#' && raw.trim() !== '') {
+      editor.innerHTML = raw;
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     BUBBLE SYNC
+     Debounced 500ms on input; immediate on blur.
+  ══════════════════════════════════════════════════════════════ */
+  function syncToBubble () {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      if (typeof bubble_fn_saveEditorData === 'function') {
+        bubble_fn_saveEditorData(editor.innerHTML);
+      }
+    }, 500);
+  }
+
+  function syncNow () {
+    clearTimeout(saveTimer);
+    if (typeof bubble_fn_saveEditorData === 'function') {
+      bubble_fn_saveEditorData(editor.innerHTML);
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     GET ACTIVE BLOCK
+     Walks the selection anchor up to the nearest direct child of
+     #huz-editor. Returns null if cursor is not inside the editor.
+  ══════════════════════════════════════════════════════════════ */
+  function getActiveBlock () {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return null;
+    let node = sel.anchorNode;
+    while (node && node.parentNode !== editor) node = node.parentNode;
+    return (node && node !== editor) ? node : null;
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     POSITION PLUS BUTTON
+     
+     Root cause of the "first line" bug (retained from v3):
+       • On first focus/click the editor may be empty (no child nodes),
+         OR the cursor sits in a raw text node — getActiveBlock() null.
+     
+     List item alignment (v4):
+       • When the cursor is inside a <li>, `block` is the parent <ul>/<ol>
+         (the direct child of #huz-editor). Using its full rect centers
+         the + button on the entire list — visually wrong for multi-line lists.
+       • Fix: After finding the top-level block, also walk the selection
+         up to the nearest <li> if one exists inside that block.
+         If an <li> is found, use ITS bounding rect for centering.
+  ══════════════════════════════════════════════════════════════ */
+  function positionPlusBtn (block) {
+    if (!block) {
+      if (document.activeElement !== editor) {
+        if (!menuOpen) plusBtn.classList.remove('visible');
+      } else {
+        showOnFirstLine();
+      }
+      return;
+    }
+
+    const edRect = editor.getBoundingClientRect();
+
+    /* Resolve to <li> level when inside a list */
+    let targetRect = block.getBoundingClientRect();
+    if (block.nodeName === 'UL' || block.nodeName === 'OL') {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        let node = sel.anchorNode;
+        while (node && node !== block) {
+          if (node.nodeName === 'LI') { targetRect = node.getBoundingClientRect(); break; }
+          node = node.parentNode;
+        }
+      }
+    }
+
+    const topOffset = targetRect.top - edRect.top + editor.scrollTop;
+    const centered  = topOffset + (targetRect.height / 2) - 11;
+
+    setButtonTop(Math.max(0, centered));
+    plusBtn.classList.add('visible');
+  }
+
+  /*
+    Fallback: position the + button at the first line of the editor.
+    We create a temporary range at the very start of the editor's
+    content, measure its bounding rect, then use that to align.
+    Includes editor.scrollTop so the button stays correct when the
+    user has scrolled down inside the editor.
+  */
+  function showOnFirstLine () {
+    const sel = window.getSelection();
+    let top;
+
+    if (sel && sel.rangeCount > 0) {
+      const caretRect = sel.getRangeAt(0).getBoundingClientRect();
+      const edRect    = editor.getBoundingClientRect();
+      if (caretRect && caretRect.height > 0) {
+        const offset = caretRect.top - edRect.top + editor.scrollTop;
+        top = offset + (caretRect.height / 2) - 11;
+      }
+    }
+
+    if (top === undefined) {
+      const lineHeight = parseFloat(getComputedStyle(editor).lineHeight) || 26;
+      top = 16 + (lineHeight / 2) - 11;
+    }
+
+    setButtonTop(Math.max(0, top));
+    plusBtn.classList.add('visible');
+  }
+
+  function setButtonTop (px) {
+    plusBtn.style.top   = px + 'px';
+    /* Menu uses translateY(-50%) in CSS, so point its `top` to the CENTER
+       of the plus button (px + half button height = px + 11) so the menu's
+       vertical midpoint aligns exactly with the button's. */
+    blockMenu.style.top = (px + 11) + 'px';
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     MENU OPEN / CLOSE
+  ══════════════════════════════════════════════════════════════ */
+  function openMenu () {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) savedRange = sel.getRangeAt(0).cloneRange();
+
+    menuOpen = true;
+    blockMenu.classList.add('open');
+    plusBtn.classList.add('open');
+    plusBtn.setAttribute('aria-expanded', 'true');
+    updateInlineBtnStates();
+  }
+
+  function closeMenu () {
+    menuOpen = false;
+    blockMenu.classList.remove('open');
+    plusBtn.classList.remove('open');
+    plusBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  /* Plus button mousedown toggle (mousedown to avoid stealing editor focus) */
+  plusBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    menuOpen ? closeMenu() : openMenu();
+  });
+
+  /* Close on outside click */
+  document.addEventListener('click', function (e) {
+    if (menuOpen && !blockMenu.contains(e.target) && e.target !== plusBtn) {
+      closeMenu();
+    }
+  });
+
+  /* ══════════════════════════════════════════════════════════════
+     BLOCK MENU — mousedown handler for all buttons
+  ══════════════════════════════════════════════════════════════ */
+  blockMenu.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+
+    const btn      = e.target.closest('.huz-menu-btn');
+    const clearBtn = e.target.closest('#huz-clear-fmt');
+
+    if (!btn) return;
+
+    if (clearBtn) {
+      editor.focus(); restoreRange();
+      document.execCommand('removeFormat', false, null);
+      closeMenu();
+      return;
+    }
+
+    const blockType = btn.getAttribute('data-block');
+    const cmd       = btn.getAttribute('data-cmd');
+
+    if (blockType) {
+      insertOrConvertBlock(blockType);
+      closeMenu();
+      return;
+    }
+
+    if (cmd) {
+      editor.focus(); restoreRange();
+      document.execCommand(cmd, false, null);
+      updateInlineBtnStates();
+      syncToBubble();
+      /* Keep menu open so user can chain multiple formats */
+    }
+  });
+
+  /* ══════════════════════════════════════════════════════════════
+     INSERT / CONVERT BLOCK
+  ══════════════════════════════════════════════════════════════ */
+  function insertOrConvertBlock (type) {
+    editor.focus();
+    restoreRange();
+
+    const cur = getActiveBlock();
+
+    if (type === 'hr') {
+      const hr = document.createElement('hr');
+      const p  = document.createElement('p'); p.innerHTML = '<br>';
+      insertAfter(hr, cur);
+      hr.parentNode.insertBefore(p, hr.nextSibling);
+      placeCursorIn(p);
+
+    } else if (type === 'ul' || type === 'ol') {
+      const list = document.createElement(type);
+      const li   = document.createElement('li');
+      li.innerHTML = (cur ? cur.innerHTML : null) || '<br>';
+      list.appendChild(li);
+      if (cur && cur.parentNode === editor) {
+        editor.replaceChild(list, cur);
+      } else {
+        insertAfter(list, cur);
+      }
+      placeCursorIn(li);
+
+    } else if (type === 'pre') {
+      const pre = document.createElement('pre');
+      pre.innerHTML = '<br>';
+      insertAfter(pre, cur);
+      placeCursorIn(pre);
+
+    } else {
+      /* p, h1, h2, h3, blockquote */
+      if (cur && cur.parentNode === editor) {
+        const el = document.createElement(type);
+        el.innerHTML = cur.innerHTML || '<br>';
+        editor.replaceChild(el, cur);
+        activeBlock = el;
+        placeCursorIn(el);
+        positionPlusBtn(el);
+      } else {
+        const el = document.createElement(type);
+        el.innerHTML = '<br>';
+        insertAfter(el, cur);
+        placeCursorIn(el);
+      }
+    }
+
+    syncToBubble();
+  }
+
+  /* ── Helpers ─────────────────────────────────────────────────── */
+
+  function restoreRange () {
+    if (!savedRange) return;
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+  }
+
+  function insertAfter (node, ref) {
+    if (ref && ref.parentNode === editor) {
+      editor.insertBefore(node, ref.nextSibling);
+    } else {
+      editor.appendChild(node);
+    }
+  }
+
+  function placeCursorIn (el) {
+    const sel   = window.getSelection();
+    const range = document.createRange();
+    let target  = el;
+    while (target.firstChild) target = target.firstChild;
+    try {
+      range.setStart(target, 0);
+      range.collapse(true);
+    } catch (_) {
+      range.selectNodeContents(el);
+      range.collapse(false);
+    }
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  /* Reflect bold/italic/underline/strike onto inline buttons */
+  function updateInlineBtnStates () {
+    ['bold','italic','underline','strikeThrough'].forEach(function (cmd) {
+      const btn = blockMenu.querySelector('[data-cmd="' + cmd + '"]');
+      if (btn) btn.classList.toggle('active', document.queryCommandState(cmd));
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     EDITOR EVENT LISTENERS
+  ══════════════════════════════════════════════════════════════ */
+
+  function onCursorMove () {
+    activeBlock = getActiveBlock();
+    positionPlusBtn(activeBlock);
+  }
+
+  editor.addEventListener('keyup',   onCursorMove);
+  editor.addEventListener('mouseup', onCursorMove);
+
+  editor.addEventListener('focus', function () {
+    setTimeout(function () {
+      activeBlock = getActiveBlock();
+      positionPlusBtn(activeBlock);
+    }, 0);
+  });
+
+  editor.addEventListener('click', function () {
+    setTimeout(function () {
+      activeBlock = getActiveBlock();
+      positionPlusBtn(activeBlock);
+    }, 0);
+  });
+
+  editor.addEventListener('input', function () {
+    activeBlock = getActiveBlock();
+    positionPlusBtn(activeBlock);
+    syncToBubble();
+  });
+
+  /* Blur: immediate sync; hide button only if focus left the whole component */
+  editor.addEventListener('blur', function (e) {
+    if (blockMenu.contains(e.relatedTarget) || e.relatedTarget === plusBtn) return;
+    plusBtn.classList.remove('visible');
+    closeMenu();
+    syncNow();
+  });
+
+  /* ── Keyboard shortcuts ──────────────────────────────────────── */
+  editor.addEventListener('keydown', function (e) {
+
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      document.execCommand(e.shiftKey ? 'outdent' : 'indent', false, null);
+      return;
+    }
+
+    if (e.key === 'Escape') { closeMenu(); return; }
+
+    if (e.key === 'Enter') {
+      const block = getActiveBlock();
+      if (block && /^H[1-3]$/.test(block.nodeName)) {
+        e.preventDefault();
+        const p = document.createElement('p');
+        p.innerHTML = '<br>';
+        editor.insertBefore(p, block.nextSibling);
+        placeCursorIn(p);
+        syncToBubble();
+      }
+    }
+
+  });
+
+  /* ══════════════════════════════════════════════════════════════
+     BOOT
+  ══════════════════════════════════════════════════════════════ */
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+})();
+</script>
