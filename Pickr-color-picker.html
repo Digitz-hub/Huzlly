@@ -1,7 +1,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/themes/nano.min.css"/>
-<div id="pickr-trigger"></div>
+<div class="pickr-trigger-el"></div>
 <style>
-#pickr-trigger{
+.pickr-trigger-el{
     width:24px;
     height:24px;
     border-radius:50%;
@@ -34,6 +34,10 @@
     display:flex;
     flex-wrap:wrap;
     gap:8px;
+}
+.pcr-app .pcr-swatches{
+    flex-wrap:nowrap !important;
+    justify-content:space-between !important;
 }
 .pcr-app .pcr-interaction .pcr-result,
 .pcr-app .pcr-interaction .pcr-type,
@@ -82,23 +86,29 @@
     background:#2563EB;
     color:#fff;
 }
-#pickr-save-btn{
+.pickr-save-btn-el{
     display:none;
+    order:3;
+    flex:1 1 100%;
     width:100%;
     margin-top:8px;
     padding:8px 0;
     border-radius:6px;
-    background:#2563EB;
+    background:#D1D5DB;
     color:#fff;
     font-size:12px;
     font-weight:600;
     letter-spacing:.03em;
-    cursor:pointer;
+    cursor:not-allowed;
     border:none;
     outline:none;
     transition:.15s;
 }
-#pickr-save-btn:hover{
+.pickr-save-btn-el.pcr-dirty{
+    background:#2563EB;
+    cursor:pointer;
+}
+.pickr-save-btn-el.pcr-dirty:hover{
     background:#1d4ed8;
 }
 </style>
@@ -107,26 +117,38 @@
 function initPickr() {
   if(typeof Pickr === 'undefined') return setTimeout(initPickr, 100);
 
-  if(window.myPickr) {
-    window.myPickr.destroyAndRemove();
-    window.myPickr = null;
-  }
-
   // ---- YAHAN PE BUBBLE KI DYNAMIC VALUE DAALO ----
   var rawColor = '#343882';     // is field ki current colour - dynamic karo Bubble se
   var fieldName = 'titleColor'; // is picker ka field name - har HTML element mein alag likho
   // ------------------------------------------------
 
+  // Har instance ka apna unique storage key (fieldName se bana) - global window pollution avoid karne ke liye
+  var instanceKey = 'pickr_' + fieldName;
+
+  // NOTE: Bubble har HTML element ko apne ALAG iframe mein render karta hai
+  // (especially jab Reusable Element ke andar Group mein repeated ho).
+  // Isliye is iframe ke document mein sirf EK hi '.pickr-trigger-el' hoga -
+  // koi clash possible nahi hai, simple querySelector kaafi hai.
+  var triggerEl = document.querySelector('.pickr-trigger-el');
+
+  if(window[instanceKey]) {
+    window[instanceKey].destroyAndRemove();
+    window[instanceKey] = null;
+  }
+
   var defaultColor = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawColor) ? rawColor : '#2563EB';
 
+  // Popup hamesha trigger ke NEECHE khulega
+  var dynamicPosition = 'bottom-start';
+
   const pickr = Pickr.create({
-    el: '#pickr-trigger',
+    el: triggerEl,
     theme: 'nano',
     default: defaultColor,
-    position: 'bottom-start',
+    position: dynamicPosition,
     hideOnSelect: false,
     autoReposition: true,
-    swatches: ['#2563EB','#3B82F6','#06B6D4','#10B981','#22C55E','#F59E0B','#EF4444','#EC4899'],
+    swatches: ['#2563EB','#3B82F6','#06B6D4','#10B981','#22C55E','#F59E0B','#EF4444','#EC4899','#8B5CF6','#A855F7','#14B8A6','#84CC16','#F97316','#6366F1'],
     components: {
       preview: true,
       opacity: true,
@@ -135,26 +157,43 @@ function initPickr() {
     }
   });
 
-  window.myPickr = pickr;
+  window[instanceKey] = pickr;
 
   var savedThisSession = false; // track kiya save hua ya nahi
+  var pickrDefaultHexStr = ''; // init event mein normalized hex se set hoga
 
   // Trigger circle ka colour LOCK karta hai (sirf init / save pe update hota hai)
+  // pickr.getRoot().button se apna hi button milta hai - poore page mein search nahi
   function lockTriggerColor(color) {
-    const btn = document.querySelector('.pcr-button');
+    const btn = pickr.getRoot().button;
     if (!btn) return;
     const rgba = color.toRGBA();
     btn.style.setProperty('--trigger-color', `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`);
   }
 
+  // Save button ka color update karta hai - match = gray, mismatch = blue
+  function updateSaveButtonState() {
+    var saveBtn = pickr.getRoot().interaction.result ? pickr.getRoot().interaction.result.parentElement.querySelector('.pickr-save-btn-el') : null;
+    if (!saveBtn) return;
+    var current = pickr.getColor();
+    if (!current) return;
+    var currentHex = current.toHEXA().toString().toUpperCase();
+    if (currentHex === pickrDefaultHexStr) {
+      saveBtn.classList.remove('pcr-dirty');
+    } else {
+      saveBtn.classList.add('pcr-dirty');
+    }
+  }
+
   pickr.on('init', (instance) => {
     lockTriggerColor(instance.getColor()); // Bubble ka saved colour dikhao
+    pickrDefaultHexStr = instance.getColor().toHEXA().toString().toUpperCase(); // normalized reference
 
-    // Save button inject karo HEXA/RGBA ke neeche
-    var interaction = document.querySelector('.pcr-app .pcr-interaction');
+    // Save button inject karo HEXA/RGBA ke neeche - apne hi popup ke interaction mein (pickr.getRoot() se)
+    var interaction = pickr.getRoot().interaction.result.parentElement;
     if(interaction) {
       var saveBtn = document.createElement('button');
-      saveBtn.id = 'pickr-save-btn';
+      saveBtn.className = 'pickr-save-btn-el';
       saveBtn.textContent = 'SAVE';
       saveBtn.onclick = function() {
         var selected = pickr.getColor(); // abhi popup mein jo selected hai
@@ -163,6 +202,8 @@ function initPickr() {
           if(hexValue && hexValue !== '' && hexValue !== '#') {
             savedThisSession = true;           // mark kiya ki save hua
             lockTriggerColor(selected);        // trigger ko naya confirmed colour dikhao
+            pickrDefaultHexStr = hexValue.toUpperCase(); // naya baseline - ab yehi "saved" colour hai
+            updateSaveButtonState();           // button wapas gray ho jaaye
             bubble_fn_colorValue(hexValue);    // PEHLE colour value bhejo
             bubble_fn_colorField(fieldName);   // PHIR field name (trigger)
             pickr.hide();
@@ -171,7 +212,13 @@ function initPickr() {
       };
       interaction.appendChild(saveBtn);
       saveBtn.style.display = 'block';
+      updateSaveButtonState(); // initial state - gray (kyunki abhi koi change nahi hua)
     }
+  });
+
+  // Jab bhi color preview mein change ho (drag, swatch click, hex type), save button color check karo
+  pickr.on('change', () => {
+    updateSaveButtonState();
   });
 
   // Popup band hone par check karo - agar bina save band hua hai
