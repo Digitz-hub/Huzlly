@@ -17,7 +17,7 @@ Bubble workflow: triggered on `colorField`'s event → conditions check `colorFi
 
 ---
 
-## Fixes applied in this session
+## Fixes applied in earlier session
 
 ### 1. Old-value-lag bug (JS-to-Bubble call order)
 **Problem:** Workflow was triggering on `colorField` (the field-identifier call), but reading `colorValue` — except `colorValue` was being sent *after* `colorField` in code, so Bubble's workflow ran with the **previous** colour value. Each save was one colour "behind."
@@ -31,6 +31,7 @@ bubble_fn_colorField(fieldName);  // trigger last
 ### 2. Dead weight / redundant code cleanup
 - Removed `closeOnScroll: false` from Pickr config — this is already Pickr's default, the line did nothing.
 - Removed the `currentColor` variable and the entire `pickr.on('change', ...)` listener used only to track it — replaced with a direct `pickr.getColor()` call inside the Save button click handler. One less listener, no redundant state tracking.
+  - *(Note: a `change` listener was reintroduced in this session for the dirty-state save button — see Fix #3 below. It now serves a real purpose instead of just tracking state.)*
 
 ### 3. Trigger circle showing live preview instead of saved colour
 **Problem:** Pickr's own button (`.pcr-button`, which is the trigger circle) updates its background live as the user drags/changes colour inside the popup — even before Save is clicked. This caused confusion between "what's currently set" vs "what's being previewed."
@@ -65,10 +66,92 @@ pickr.on('hide', () => {
 
 ---
 
+## Fixes applied in this session
+
+### 5. Save button moved to bottom of popup
+**Problem:** Save button was rendering above the HEXA/RGBA result row inside `.pcr-interaction` (default flex order), which felt visually out of place.
+
+**Fix:** Set explicit flex `order` on the Save button so it always lands last, after the result row (`order:1`) and the HEXA/RGBA toggle (`order:2`):
+```css
+#pickr-save-btn{
+    order:3;
+    flex:1 1 100%;
+    ...
+}
+```
+
+### 6. Save button colour reflects dirty/clean state
+**Problem:** Save button was always blue regardless of whether the previewed colour actually differed from Bubble's saved value — no visual cue for "nothing to save" vs "unsaved change pending."
+
+**Fix:** Reintroduced a `pickr.on('change', ...)` listener (removed earlier in Fix #2, now serves a real purpose). A `pickrDefaultHexStr` variable holds the normalized hex of the currently-saved colour — set on `init` from `instance.getColor()`, and updated again on every successful Save. On every `change` event, the live preview colour is compared against this baseline:
+- **Match** → `.pcr-dirty` class removed → button is gray (`#D1D5DB`), `cursor: not-allowed`
+- **Mismatch** → `.pcr-dirty` class added → button is blue (`#2563EB`), clickable
+
+```css
+#pickr-save-btn{
+    background:#D1D5DB;
+    cursor:not-allowed;
+}
+#pickr-save-btn.pcr-dirty{
+    background:#2563EB;
+    cursor:pointer;
+}
+```
+```javascript
+function updateSaveButtonState() {
+  var saveBtn = document.getElementById('pickr-save-btn');
+  if (!saveBtn) return;
+  var current = pickr.getColor();
+  if (!current) return;
+  var currentHex = current.toHEXA().toString().toUpperCase();
+  if (currentHex === pickrDefaultHexStr) {
+    saveBtn.classList.remove('pcr-dirty');
+  } else {
+    saveBtn.classList.add('pcr-dirty');
+  }
+}
+
+pickr.on('change', () => {
+  updateSaveButtonState();
+});
+```
+On Save click, `pickrDefaultHexStr` is updated to the newly saved hex *before* `updateSaveButtonState()` runs, so the button immediately flips back to gray (its current preview now matches the new baseline).
+
+### 7. Swatches forced into a single row
+**Problem:** With 8 default swatches, the row was wrapping — 7 fit on the first line, 1 dropped to a second line.
+
+**Fix (iterated through several approaches this session):**
+- First tried `flex-wrap: nowrap` + explicit small swatch sizing (`14–18px`) + `justify-content: space-between` on `.pcr-swatches` — worked, but per later request the explicit sizing was reverted.
+- **Final state:** swatch sizing is back to Pickr's own default (no overridden `width`/`height` on `.pcr-swatch`), and only wrapping/alignment is controlled:
+```css
+.pcr-app .pcr-swatches{
+    flex-wrap:nowrap !important;
+    justify-content:space-between !important;
+}
+```
+- Swatch count was adjusted a few times during testing (8 → 6 → 7 → 14) purely to test row behavior at different counts. **Current count: 14 swatches** (see code block below) — at this count, with default sizing, the row **will wrap to 2 lines** since 14 default-sized swatches don't fit in one row width. If a strict single-row layout is needed again at 14 swatches, the explicit small-size CSS from the earlier iteration will need to be reapplied.
+
+### 8. Dynamic popup position (upper vs lower half of screen)
+**Note:** The current file includes a position-detection block that picks `top-start` vs `bottom-start` based on where the trigger sits on screen (added/carried over outside of this session's explicit requests — flagging here so it's documented and not lost):
+```javascript
+var triggerEl = document.querySelector('#pickr-trigger');
+var dynamicPosition = 'bottom-start';
+if (triggerEl) {
+  var rect = triggerEl.getBoundingClientRect();
+  var viewportHeight = window.innerHeight;
+  dynamicPosition = (rect.top > viewportHeight * 0.5) ? 'top-start' : 'bottom-start';
+}
+```
+This is passed into `position: dynamicPosition` in the Pickr config instead of the previously hardcoded `'bottom-start'`. **Needs verification** that this is actually wanted/tested — flagging for confirmation next session.
+
+---
+
 ## ⚠️ Needs live testing (not verified in a real browser by Claude)
 
 - Confirm the `!important` CSS lock on `.pcr-button` actually overrides Pickr's own internal style updates in all browsers used. If Pickr ever sets inline styles with `'important'` priority via `style.setProperty(prop, val, 'important')`, it could still win over the CSS rule — if so, the trigger may still flicker during preview, and the fix would need to move to a `useAsButton: true` setup instead.
 - Confirm `pickr.setColor(defaultColor)` on `hide` doesn't cause any visible flash/flicker before the popup fully closes.
+- Confirm 14 swatches at default sizing renders as expected (2 rows) and that this is the desired look — if a single row is wanted, revisit Fix #7's explicit sizing approach.
+- Confirm the dynamic `top-start`/`bottom-start` position logic (Fix #8) behaves correctly across all instances on the page, especially ones near the vertical midpoint of the viewport.
 
 ---
 
@@ -113,6 +196,10 @@ pickr.on('hide', () => {
     display:flex;
     flex-wrap:wrap;
     gap:8px;
+}
+.pcr-app .pcr-swatches{
+    flex-wrap:nowrap !important;
+    justify-content:space-between !important;
 }
 .pcr-app .pcr-interaction .pcr-result,
 .pcr-app .pcr-interaction .pcr-type,
@@ -163,21 +250,27 @@ pickr.on('hide', () => {
 }
 #pickr-save-btn{
     display:none;
+    order:3;
+    flex:1 1 100%;
     width:100%;
     margin-top:8px;
     padding:8px 0;
     border-radius:6px;
-    background:#2563EB;
+    background:#D1D5DB;
     color:#fff;
     font-size:12px;
     font-weight:600;
     letter-spacing:.03em;
-    cursor:pointer;
+    cursor:not-allowed;
     border:none;
     outline:none;
     transition:.15s;
 }
-#pickr-save-btn:hover{
+#pickr-save-btn.pcr-dirty{
+    background:#2563EB;
+    cursor:pointer;
+}
+#pickr-save-btn.pcr-dirty:hover{
     background:#1d4ed8;
 }
 </style>
@@ -198,14 +291,23 @@ function initPickr() {
 
   var defaultColor = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawColor) ? rawColor : '#2563EB';
 
+  // Trigger page ke upper half mein hai ya lower half mein, us hisaab se popup ka direction decide karo
+  var triggerEl = document.querySelector('#pickr-trigger');
+  var dynamicPosition = 'bottom-start';
+  if (triggerEl) {
+    var rect = triggerEl.getBoundingClientRect();
+    var viewportHeight = window.innerHeight;
+    dynamicPosition = (rect.top > viewportHeight * 0.5) ? 'top-start' : 'bottom-start';
+  }
+
   const pickr = Pickr.create({
     el: '#pickr-trigger',
     theme: 'nano',
     default: defaultColor,
-    position: 'bottom-start',
+    position: dynamicPosition,
     hideOnSelect: false,
     autoReposition: true,
-    swatches: ['#2563EB','#3B82F6','#06B6D4','#10B981','#22C55E','#F59E0B','#EF4444','#EC4899'],
+    swatches: ['#2563EB','#3B82F6','#06B6D4','#10B981','#22C55E','#F59E0B','#EF4444','#EC4899','#8B5CF6','#A855F7','#14B8A6','#84CC16','#F97316','#6366F1'],
     components: {
       preview: true,
       opacity: true,
@@ -217,6 +319,7 @@ function initPickr() {
   window.myPickr = pickr;
 
   var savedThisSession = false; // track kiya save hua ya nahi
+  var pickrDefaultHexStr = ''; // init event mein normalized hex se set hoga
 
   // Trigger circle ka colour LOCK karta hai (sirf init / save pe update hota hai)
   function lockTriggerColor(color) {
@@ -226,8 +329,23 @@ function initPickr() {
     btn.style.setProperty('--trigger-color', `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`);
   }
 
+  // Save button ka color update karta hai - match = gray, mismatch = blue
+  function updateSaveButtonState() {
+    var saveBtn = document.getElementById('pickr-save-btn');
+    if (!saveBtn) return;
+    var current = pickr.getColor();
+    if (!current) return;
+    var currentHex = current.toHEXA().toString().toUpperCase();
+    if (currentHex === pickrDefaultHexStr) {
+      saveBtn.classList.remove('pcr-dirty');
+    } else {
+      saveBtn.classList.add('pcr-dirty');
+    }
+  }
+
   pickr.on('init', (instance) => {
     lockTriggerColor(instance.getColor()); // Bubble ka saved colour dikhao
+    pickrDefaultHexStr = instance.getColor().toHEXA().toString().toUpperCase(); // normalized reference
 
     // Save button inject karo HEXA/RGBA ke neeche
     var interaction = document.querySelector('.pcr-app .pcr-interaction');
@@ -242,6 +360,8 @@ function initPickr() {
           if(hexValue && hexValue !== '' && hexValue !== '#') {
             savedThisSession = true;           // mark kiya ki save hua
             lockTriggerColor(selected);        // trigger ko naya confirmed colour dikhao
+            pickrDefaultHexStr = hexValue.toUpperCase(); // naya baseline - ab yehi "saved" colour hai
+            updateSaveButtonState();           // button wapas gray ho jaaye
             bubble_fn_colorValue(hexValue);    // PEHLE colour value bhejo
             bubble_fn_colorField(fieldName);   // PHIR field name (trigger)
             pickr.hide();
@@ -250,7 +370,13 @@ function initPickr() {
       };
       interaction.appendChild(saveBtn);
       saveBtn.style.display = 'block';
+      updateSaveButtonState(); // initial state - gray (kyunki abhi koi change nahi hua)
     }
+  });
+
+  // Jab bhi color preview mein change ho (drag, swatch click, hex type), save button color check karo
+  pickr.on('change', () => {
+    updateSaveButtonState();
   });
 
   // Popup band hone par check karo - agar bina save band hua hai
@@ -274,4 +400,7 @@ initPickr();
 - [ ] Confirm in live Bubble preview: trigger circle does NOT change while dragging inside popup
 - [ ] Confirm: closing popup without Save → reopening shows Bubble's saved colour, not leftover preview
 - [ ] Confirm: Save still sends correct `colorValue` + `colorField` to the workflow, one-to-one (no lag)
-- [ ] Roll out the same two-line change (`rawColor`, `fieldName`) to all remaining HTML elements (10–15 total per earlier discussion)
+- [ ] Confirm: Save button is gray when preview colour matches saved colour, blue when it differs
+- [ ] Confirm: 14 swatches render acceptably (currently wraps to 2 rows at default sizing) — decide if single-row is still wanted
+- [ ] Confirm/verify the dynamic top/bottom popup positioning logic (Fix #8) — flagged as unconfirmed, was present in code but not explicitly requested this session
+- [ ] Roll out the same changes to all remaining HTML elements (10–15 total per earlier discussion)
