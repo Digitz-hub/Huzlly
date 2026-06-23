@@ -1,0 +1,119 @@
+<!-- ============================================================ -->
+<!-- --- GLOBAL HEADER CODE (Put in Page/App Header) ---        -->
+<!--   Load ONCE per page. Do NOT repeat in individual elements. -->
+<!-- ============================================================ -->
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/themes/nano.min.css"/>
+
+<style>
+/* --- Pickr trigger button overrides (shared across all instances) --- */
+.pcr-button {
+    width:24px !important;
+    height:24px !important;
+    border-radius:50% !important;
+    box-shadow: none !important;
+    outline: none !important;
+    border: none !important;
+    background: var(--trigger-color, #2563EB) !important;
+}
+.pcr-button::before,
+.pcr-button::after {
+    display: none !important;
+}
+.pcr-button:hover,
+.pcr-button:focus,
+.pcr-button:active,
+.pcr-button.active {
+    box-shadow: none !important;
+    outline: none !important;
+    border: none !important;
+    filter: none !important;
+}
+
+/* --- Pickr popup interaction layout --- */
+.pcr-app .pcr-interaction{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+}
+.pcr-app .pcr-swatches{
+    flex-wrap:nowrap !important;
+    justify-content:space-between !important;
+}
+.pcr-app .pcr-interaction .pcr-result,
+.pcr-app .pcr-interaction .pcr-type,
+.pcr-app .pcr-swatches button,
+.pcr-app .pcr-swatches .pcr-swatch{
+    border:none;
+    outline:none !important;
+    box-shadow:none;
+    transition:.15s;
+}
+.pcr-app .pcr-interaction .pcr-result:hover,
+.pcr-app .pcr-interaction .pcr-result:focus,
+.pcr-app .pcr-interaction .pcr-type:hover,
+.pcr-app .pcr-interaction .pcr-type:focus,
+.pcr-app .pcr-swatches button:hover,
+.pcr-app .pcr-swatches .pcr-swatch:hover,
+.pcr-app .pcr-swatches button:focus,
+.pcr-app .pcr-swatches .pcr-swatch:focus,
+.pcr-app .pcr-swatches button.pcr-active,
+.pcr-app .pcr-swatches .pcr-swatch.pcr-active{
+    outline:none !important;
+    box-shadow:0 0 4px rgba(0,0,0,.18) !important;
+}
+.pcr-app .pcr-interaction .pcr-result{
+    flex:1 1 100%;
+    order:1;
+}
+.pcr-app .pcr-interaction .pcr-type{
+    order:2;
+    flex:1;
+    margin:0;
+    padding:8px 0;
+    border-radius:6px;
+    background:#F9FAFB;
+    color:#374151;
+    font-size:12px;
+    font-weight:600;
+    letter-spacing:.03em;
+    cursor:pointer;
+}
+.pcr-app .pcr-interaction .pcr-type:hover,
+.pcr-app .pcr-interaction .pcr-type:focus{
+    background:#F3F4F6;
+}
+.pcr-app .pcr-interaction .pcr-type.active{
+    background:#2563EB;
+    color:#fff;
+}
+
+/* --- Save button (injected into each popup) --- */
+.pickr-save-btn-el{
+    display:none;
+    order:3;
+    flex:1 1 100%;
+    width:100%;
+    margin-top:8px;
+    padding:8px 0;
+    border-radius:6px;
+    background:#D1D5DB;
+    color:#fff;
+    font-size:12px;
+    font-weight:600;
+    letter-spacing:.03em;
+    cursor:not-allowed;
+    border:none;
+    outline:none;
+    transition:.15s;
+}
+.pickr-save-btn-el.pcr-dirty{
+    background:#2563EB;
+    cursor:pointer;
+}
+.pickr-save-btn-el.pcr-dirty:hover{
+    background:#1d4ed8;
+}
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/pickr.min.js"></script>
