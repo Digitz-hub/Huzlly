@@ -1,0 +1,188 @@
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/themes/nano.min.css"/>
+<div id="pickr-trigger"></div>
+<style>
+#pickr-trigger{
+    width:24px;
+    height:24px;
+    border-radius:50%;
+    background:#2563EB;
+    cursor:pointer;
+}
+.pcr-button {
+    width:24px !important;
+    height:24px !important;
+    border-radius:50% !important;
+    box-shadow: none !important;
+    outline: none !important;
+    border: none !important;
+    background: var(--trigger-color, #2563EB) !important;
+}
+.pcr-button::before,
+.pcr-button::after {
+    display: none !important;
+}
+.pcr-button:hover,
+.pcr-button:focus,
+.pcr-button:active,
+.pcr-button.active {
+    box-shadow: none !important;
+    outline: none !important;
+    border: none !important;
+    filter: none !important;
+}
+.pcr-app .pcr-interaction{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+}
+.pcr-app .pcr-interaction .pcr-result,
+.pcr-app .pcr-interaction .pcr-type,
+.pcr-app .pcr-swatches button,
+.pcr-app .pcr-swatches .pcr-swatch{
+    border:none;
+    outline:none !important;
+    box-shadow:none;
+    transition:.15s;
+}
+.pcr-app .pcr-interaction .pcr-result:hover,
+.pcr-app .pcr-interaction .pcr-result:focus,
+.pcr-app .pcr-interaction .pcr-type:hover,
+.pcr-app .pcr-interaction .pcr-type:focus,
+.pcr-app .pcr-swatches button:hover,
+.pcr-app .pcr-swatches .pcr-swatch:hover,
+.pcr-app .pcr-swatches button:focus,
+.pcr-app .pcr-swatches .pcr-swatch:focus,
+.pcr-app .pcr-swatches button.pcr-active,
+.pcr-app .pcr-swatches .pcr-swatch.pcr-active{
+    outline:none !important;
+    box-shadow:0 0 4px rgba(0,0,0,.18) !important;
+}
+.pcr-app .pcr-interaction .pcr-result{
+    flex:1 1 100%;
+    order:1;
+}
+.pcr-app .pcr-interaction .pcr-type{
+    order:2;
+    flex:1;
+    margin:0;
+    padding:8px 0;
+    border-radius:6px;
+    background:#F9FAFB;
+    color:#374151;
+    font-size:12px;
+    font-weight:600;
+    letter-spacing:.03em;
+    cursor:pointer;
+}
+.pcr-app .pcr-interaction .pcr-type:hover,
+.pcr-app .pcr-interaction .pcr-type:focus{
+    background:#F3F4F6;
+}
+.pcr-app .pcr-interaction .pcr-type.active{
+    background:#2563EB;
+    color:#fff;
+}
+#pickr-save-btn{
+    display:none;
+    width:100%;
+    margin-top:8px;
+    padding:8px 0;
+    border-radius:6px;
+    background:#2563EB;
+    color:#fff;
+    font-size:12px;
+    font-weight:600;
+    letter-spacing:.03em;
+    cursor:pointer;
+    border:none;
+    outline:none;
+    transition:.15s;
+}
+#pickr-save-btn:hover{
+    background:#1d4ed8;
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/pickr.min.js"></script>
+<script>
+function initPickr() {
+  if(typeof Pickr === 'undefined') return setTimeout(initPickr, 100);
+
+  if(window.myPickr) {
+    window.myPickr.destroyAndRemove();
+    window.myPickr = null;
+  }
+
+  // ---- YAHAN PE BUBBLE KI DYNAMIC VALUE DAALO ----
+  var rawColor = '#343882';     // is field ki current colour - dynamic karo Bubble se
+  var fieldName = 'titleColor'; // is picker ka field name - har HTML element mein alag likho
+  // ------------------------------------------------
+
+  var defaultColor = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawColor) ? rawColor : '#2563EB';
+
+  const pickr = Pickr.create({
+    el: '#pickr-trigger',
+    theme: 'nano',
+    default: defaultColor,
+    position: 'bottom-start',
+    hideOnSelect: false,
+    autoReposition: true,
+    swatches: ['#2563EB','#3B82F6','#06B6D4','#10B981','#22C55E','#F59E0B','#EF4444','#EC4899'],
+    components: {
+      preview: true,
+      opacity: true,
+      hue: true,
+      interaction: { hex: true, rgba: true, input: true }
+    }
+  });
+
+  window.myPickr = pickr;
+
+  var savedThisSession = false; // track kiya save hua ya nahi
+
+  // Trigger circle ka colour LOCK karta hai (sirf init / save pe update hota hai)
+  function lockTriggerColor(color) {
+    const btn = document.querySelector('.pcr-button');
+    if (!btn) return;
+    const rgba = color.toRGBA();
+    btn.style.setProperty('--trigger-color', `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`);
+  }
+
+  pickr.on('init', (instance) => {
+    lockTriggerColor(instance.getColor()); // Bubble ka saved colour dikhao
+
+    // Save button inject karo HEXA/RGBA ke neeche
+    var interaction = document.querySelector('.pcr-app .pcr-interaction');
+    if(interaction) {
+      var saveBtn = document.createElement('button');
+      saveBtn.id = 'pickr-save-btn';
+      saveBtn.textContent = 'SAVE';
+      saveBtn.onclick = function() {
+        var selected = pickr.getColor(); // abhi popup mein jo selected hai
+        if(selected) {
+          var hexValue = selected.toHEXA().toString();
+          if(hexValue && hexValue !== '' && hexValue !== '#') {
+            savedThisSession = true;           // mark kiya ki save hua
+            lockTriggerColor(selected);        // trigger ko naya confirmed colour dikhao
+            bubble_fn_colorValue(hexValue);    // PEHLE colour value bhejo
+            bubble_fn_colorField(fieldName);   // PHIR field name (trigger)
+            pickr.hide();
+          }
+        }
+      };
+      interaction.appendChild(saveBtn);
+      saveBtn.style.display = 'block';
+    }
+  });
+
+  // Popup band hone par check karo - agar bina save band hua hai
+  // to popup ke andar wapas Bubble ki original value set karo
+  pickr.on('hide', () => {
+    if(!savedThisSession) {
+      pickr.setColor(defaultColor);
+    }
+    savedThisSession = false; // reset flag agle round ke liye
+  });
+}
+
+initPickr();
+</script>
