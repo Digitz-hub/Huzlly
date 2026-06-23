@@ -15,6 +15,7 @@
     box-shadow: none !important;
     outline: none !important;
     border: none !important;
+    background: var(--trigger-color, #2563EB) !important;
 }
 .pcr-button::before,
 .pcr-button::after {
@@ -124,7 +125,6 @@ function initPickr() {
     default: defaultColor,
     position: 'bottom-start',
     hideOnSelect: false,
-    closeOnScroll: false,
     autoReposition: true,
     swatches: ['#2563EB','#3B82F6','#06B6D4','#10B981','#22C55E','#F59E0B','#EF4444','#EC4899'],
     components: {
@@ -137,17 +137,18 @@ function initPickr() {
 
   window.myPickr = pickr;
 
-  var currentColor = null;
+  var savedThisSession = false; // track kiya save hua ya nahi
 
-  function updateTriggerColor(color) {
+  // Trigger circle ka colour LOCK karta hai (sirf init / save pe update hota hai)
+  function lockTriggerColor(color) {
     const btn = document.querySelector('.pcr-button');
     if (!btn) return;
     const rgba = color.toRGBA();
-    btn.style.background = `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`;
+    btn.style.setProperty('--trigger-color', `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`);
   }
 
   pickr.on('init', (instance) => {
-    updateTriggerColor(instance.getColor());
+    lockTriggerColor(instance.getColor()); // Bubble ka saved colour dikhao
 
     // Save button inject karo HEXA/RGBA ke neeche
     var interaction = document.querySelector('.pcr-app .pcr-interaction');
@@ -156,11 +157,14 @@ function initPickr() {
       saveBtn.id = 'pickr-save-btn';
       saveBtn.textContent = 'SAVE';
       saveBtn.onclick = function() {
-        if(currentColor) {
-          var hexValue = currentColor.toHEXA().toString();
+        var selected = pickr.getColor(); // abhi popup mein jo selected hai
+        if(selected) {
+          var hexValue = selected.toHEXA().toString();
           if(hexValue && hexValue !== '' && hexValue !== '#') {
-            bubble_fn_colorField(fieldName); // <-- konsa field hai ye bhejo
-            bubble_fn_colorValue(hexValue);  // <-- colour value bhejo
+            savedThisSession = true;           // mark kiya ki save hua
+            lockTriggerColor(selected);        // trigger ko naya confirmed colour dikhao
+            bubble_fn_colorValue(hexValue);    // PEHLE colour value bhejo
+            bubble_fn_colorField(fieldName);   // PHIR field name (trigger)
             pickr.hide();
           }
         }
@@ -170,9 +174,13 @@ function initPickr() {
     }
   });
 
-  pickr.on('change', (color) => {
-    currentColor = color;
-    updateTriggerColor(color);
+  // Popup band hone par check karo - agar bina save band hua hai
+  // to popup ke andar wapas Bubble ki original value set karo
+  pickr.on('hide', () => {
+    if(!savedThisSession) {
+      pickr.setColor(defaultColor);
+    }
+    savedThisSession = false; // reset flag agle round ke liye
   });
 }
 
