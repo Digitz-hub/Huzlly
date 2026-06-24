@@ -139,10 +139,10 @@
     var pickrDefaultHexStr = '';
     var debounceTimer = null;
 
-    function lockTriggerColor(color) {
+    function lockTriggerColor(colour) {
       const btn = pickr.getRoot().button;
       if (!btn) return;
-      const rgba = color.toRGBA();
+      const rgba = colour.toRGBA();
       btn.style.setProperty('--trigger-color', `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`);
     }
 
@@ -201,7 +201,7 @@
     pickr.on('change', () => {
       updateSaveButtonState();
 
-      // 500ms debounce se live preview value Bubble ko bhejo
+      // 500ms debounce se live preview colour Bubble ko bhejo
       // saved: false — sirf preview workflow chalega, rawColor update nahi hoga
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
@@ -231,6 +231,9 @@
 
       if(!savedThisSession) {
         pickr.setColor(defaultColor);
+        // Bubble custom state ko bhi last saved colour pe revert karo
+        var revertPayload = { field: fieldName, value: defaultColor, saved: false };
+        bubble_fn_colorData(JSON.stringify(revertPayload));
       }
       savedThisSession = false;
     });
