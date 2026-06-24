@@ -65,26 +65,9 @@
     flex:1 1 100%;
     order:1;
 }
+/* HEXA/RGBA toggle buttons hidden - sirf HEXA mode use hota hai */
 .pcr-app .pcr-interaction .pcr-type{
-    order:2;
-    flex:1;
-    margin:0;
-    padding:8px 0;
-    border-radius:6px;
-    background:#F9FAFB;
-    color:#374151;
-    font-size:12px;
-    font-weight:600;
-    letter-spacing:.03em;
-    cursor:pointer;
-}
-.pcr-app .pcr-interaction .pcr-type:hover,
-.pcr-app .pcr-interaction .pcr-type:focus{
-    background:#F3F4F6;
-}
-.pcr-app .pcr-interaction .pcr-type.active{
-    background:#2563EB;
-    color:#fff;
+    display:none !important;
 }
 .pickr-save-btn-el{
     display:none;
@@ -146,7 +129,7 @@
         preview: true,
         opacity: true,
         hue: true,
-        interaction: { hex: true, rgba: true, input: true }
+        interaction: { hex: true, rgba: false, input: true }
       }
     });
 
@@ -154,6 +137,7 @@
 
     var savedThisSession = false;
     var pickrDefaultHexStr = '';
+    var debounceTimer = null;
 
     function lockTriggerColor(color) {
       const btn = pickr.getRoot().button;
@@ -183,7 +167,6 @@
       var result = pickr.getRoot().interaction.result;
       var interaction = result ? result.parentElement : null;
       if(interaction) {
-        // Prevent duplicate buttons on re-render
         var existingBtn = interaction.querySelector('.pickr-save-btn-el');
         if (existingBtn) existingBtn.remove();
 
@@ -201,7 +184,8 @@
               defaultColor = hexValue;
               updateSaveButtonState();
 
-              var payload = { field: fieldName, value: hexValue };
+              // saved: true — Bubble rawColor update krega
+              var payload = { field: fieldName, value: hexValue, saved: true };
               bubble_fn_colorData(JSON.stringify(payload));
 
               pickr.hide();
@@ -216,6 +200,19 @@
 
     pickr.on('change', () => {
       updateSaveButtonState();
+
+      // 500ms debounce se live preview value Bubble ko bhejo
+      // saved: false — sirf preview workflow chalega, rawColor update nahi hoga
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        var current = pickr.getColor();
+        if (!current) return;
+        var hexValue = current.toHEXA().toString();
+        if (hexValue && hexValue !== '' && hexValue !== '#') {
+          var payload = { field: fieldName, value: hexValue, saved: false };
+          bubble_fn_colorData(JSON.stringify(payload));
+        }
+      }, 500);
     });
 
     // Popup open hone par pointer events restore karo
@@ -225,8 +222,10 @@
     });
 
     pickr.on('hide', () => {
+      // Pending debounce cancel karo - popup close hone ke baad stale value na jaaye Bubble ko
+      clearTimeout(debounceTimer);
+
       // Poore popup ke pointer events band - cursor glitch kisi bhi element pe na aaye
-      // (save button, swatches, type toggle - sab cover ho jaate hain)
       var app = pickr.getRoot().app;
       if (app) app.style.pointerEvents = 'none';
 
