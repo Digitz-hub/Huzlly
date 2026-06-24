@@ -132,7 +132,7 @@
     }
 
     var defaultColor = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawColor) ? rawColor : '#2563EB';
-    var dynamicPosition = 'bottom-start';
+    var dynamicPosition = 'left-middle';
 
     const pickr = Pickr.create({
       el: triggerEl,
@@ -218,7 +218,18 @@
       updateSaveButtonState();
     });
 
+    // Popup open hone par pointer events restore karo
+    pickr.on('show', () => {
+      var app = pickr.getRoot().app;
+      if (app) app.style.pointerEvents = '';
+    });
+
     pickr.on('hide', () => {
+      // Poore popup ke pointer events band - cursor glitch kisi bhi element pe na aaye
+      // (save button, swatches, type toggle - sab cover ho jaate hain)
+      var app = pickr.getRoot().app;
+      if (app) app.style.pointerEvents = 'none';
+
       if(!savedThisSession) {
         pickr.setColor(defaultColor);
       }
