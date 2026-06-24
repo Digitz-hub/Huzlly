@@ -1,7 +1,7 @@
-# Pickr Color Picker — Bubble.io Integration — Session Update
+# Pickr Colour Picker — Bubble.io Integration — Session Update
 
-**Continuing from:** Converting Pickr color picker trigger to class-based element
-**Last updated:** June 24, 2026 (Live Preview Debounce + saved Flag + HEXA-only mode)
+**Continuing from:** Converting Pickr colour picker trigger to class-based element
+**Last updated:** June 24, 2026 (Live Preview Debounce + saved Flag + HEXA-only mode + Revert on Dismiss)
 
 ---
 
@@ -42,7 +42,7 @@ Bubble renders each HTML element inside its own isolated `<iframe>` — scripts 
 Swapped call order — `colorValue` sent before `colorField`. Superseded by Fix #9.
 
 ### 2. Dead weight / redundant code cleanup
-Removed `closeOnScroll: false` and redundant `currentColor` tracking. `change` listener reintroduced later for dirty-state (Fix #6).
+Removed `closeOnScroll: false` and redundant `currentColour` tracking. `change` listener reintroduced later for dirty-state (Fix #6).
 
 ### 3. Trigger circle locked to saved colour
 `.pcr-button` background locked via CSS custom property `--trigger-color` with `!important`. Only updated on `init` and Save click — live drag does not affect trigger circle.
@@ -54,8 +54,8 @@ Removed `closeOnScroll: false` and redundant `currentColor` tracking. `change` l
 Flex `order:3` on `.pickr-save-btn-el` — renders after result row (`order:1`) and type toggle (`order:2`).
 
 ### 6. Save button dirty/clean state
-`pickrDefaultHexStr` holds normalized hex of saved colour. On every `change`, current preview vs baseline compared:
-- Match → `.pcr-dirty` removed → gray button, `cursor: not-allowed`
+`pickrDefaultHexStr` holds normalised hex of saved colour. On every `change`, current preview vs baseline compared:
+- Match → `.pcr-dirty` removed → grey button, `cursor: not-allowed`
 - Mismatch → `.pcr-dirty` added → blue button, clickable
 
 ### 7. Swatches single row
@@ -116,11 +116,28 @@ bubble_fn_colorData(JSON.stringify(payload));
 clearTimeout(debounceTimer);
 ```
 
+### 17. Revert Bubble state on dismiss without save
+**Problem:** When the user closed the popup without clicking Save, the picker correctly reset its internal colour via `pickr.setColor(defaultColor)` — but Bubble's custom state was left stuck on the last previewed colour from the live drag.
+
+**Fix:** Inside the `hide` event's `if(!savedThisSession)` block, immediately after resetting the picker, a revert payload is sent to Bubble with `saved: false` and `defaultColor` as the value. This triggers Workflow 1 (live preview), which updates the UI state back to the last saved colour without touching `rawColor`.
+
+```javascript
+if(!savedThisSession) {
+  pickr.setColor(defaultColor);
+  // Revert Bubble custom state back to last saved colour
+  var revertPayload = { field: fieldName, value: defaultColor, saved: false };
+  bubble_fn_colorData(JSON.stringify(revertPayload));
+}
+```
+
+Note: `defaultColor` at this point always holds the most recently confirmed saved colour (thanks to Fix #10), so the reverted value is always correct.
+
 ---
 
 ## ⚠️ Needs live testing
 
 - Confirm trigger circle does NOT change while dragging inside popup
+- Confirm closing without Save → Bubble state reverts to last saved colour (Fix #17)
 - Confirm closing without Save → reopen shows most recently saved colour (Fix #10)
 - Confirm 14 swatches wrapping to 2 rows is acceptable — if single row needed, add explicit swatch sizing CSS
 - Confirm `saved: false` workflow does NOT update `rawColor` — popup must stay open during live drag
@@ -143,6 +160,7 @@ clearTimeout(debounceTimer);
 - [x] Case-sensitive `fieldName` matching in Bubble regex
 - [x] DOM preservation on re-render (duplicate Save button guard)
 - [x] Fully self-contained per instance — no Page Header dependency
+- [x] Bubble state reverted to last saved colour on dismiss without save (Fix #17)
 
 ---
 
@@ -292,10 +310,10 @@ clearTimeout(debounceTimer);
     var pickrDefaultHexStr = '';
     var debounceTimer = null;
 
-    function lockTriggerColor(color) {
+    function lockTriggerColor(colour) {
       const btn = pickr.getRoot().button;
       if (!btn) return;
-      const rgba = color.toRGBA();
+      const rgba = colour.toRGBA();
       btn.style.setProperty('--trigger-color', `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`);
     }
 
@@ -354,7 +372,7 @@ clearTimeout(debounceTimer);
     pickr.on('change', () => {
       updateSaveButtonState();
 
-      // 500ms debounce se live preview value Bubble ko bhejo
+      // 500ms debounce se live preview colour Bubble ko bhejo
       // saved: false — sirf preview workflow chalega, rawColor update nahi hoga
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
@@ -384,6 +402,9 @@ clearTimeout(debounceTimer);
 
       if(!savedThisSession) {
         pickr.setColor(defaultColor);
+        // Bubble custom state ko bhi last saved colour pe revert karo
+        var revertPayload = { field: fieldName, value: defaultColor, saved: false };
+        bubble_fn_colorData(JSON.stringify(revertPayload));
       }
       savedThisSession = false;
     });
