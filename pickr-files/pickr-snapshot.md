@@ -1,7 +1,7 @@
 # Pickr Color Picker — Bubble.io Integration — Snapshot
 
 **Last updated:** June 26, 2026
-**Fixes covered:** #1–27 + housekeeping pass (see session log below)
+**Fixes covered:** #1–27 + housekeeping pass + UI polish pass (see session log below)
 
 ---
 
@@ -31,7 +31,7 @@ Each instance runs inside an IIFE. On script parse:
 2. Calls `initPickrInstance()`, which retries every 100ms until `Pickr` is available on `window`
 3. On re-init, runs `cleanup()` on the old instance before destroying it (Fixes #25, #26)
 
-On `init`: injects CANCEL button and tip note into Pickr's interaction panel.
+On `init`: injects CANCEL button into Pickr's interaction panel.
 On `show`: attaches scoped `keydown` listener for Escape-as-cancel.
 On `change`: debounced 500ms send to Bubble with `saved: false`.
 On `hide`: runs `cleanup()`, then either skips (if cancelled) or auto-saves with `saved: true`.
@@ -107,6 +107,13 @@ If Bubble re-rendered while a popup was open, `hide` never fired. The Escape `ke
 
 ---
 
+### UI polish pass (no logic changes)
+- **CANCEL button restyled:** white background, `#e0e0e0` border, `#9e9e9e` text, `10px 24px` padding, `8px` border-radius, `transition: all .3s ease`. Hover state turns border `#ffcdd2` and text `#ef5350` (red-tinted) — signals destructive intent without being aggressive at rest.
+- **Popup rounded corners:** `.pcr-app` given `border-radius: 12px`, `border: 1px solid #e0e0e0`, `box-shadow: 0 4px 16px rgba(0,0,0,.10)`, and `overflow: hidden` to clip inner canvas to the rounded corners.
+- **Tip note removed:** `.pickr-tip-note-el` CSS, its stale-guard on re-init, and its JS creation/injection all deleted. Auto-save behaviour is self-evident from the UI — CANCEL is the only explicit action, so the note was answering a question users no longer ask.
+
+---
+
 ## Known accepted risks
 
 | Risk | Why accepted |
@@ -131,4 +138,4 @@ If Bubble re-rendered while a popup was open, `hide` never fired. The Escape `ke
 - [ ] Escape → identical behaviour to CANCEL
 - [ ] Escape listener removed on `hide` — only one active listener at a time across all instances
 - [ ] Trigger circle colour does not change mid-drag, only on auto-save or cancel-revert
-- [ ] No duplicate CANCEL button / tip note on parent Reusable Element re-render
+- [ ] No duplicate CANCEL button on parent Reusable Element re-render
