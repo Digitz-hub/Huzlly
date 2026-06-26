@@ -121,14 +121,16 @@
 
   var instanceKey = 'pickr_' + fieldName;
 
-  // Fix #24: claim the trigger element immediately at script-parse time, NOT inside
-  // initPickrInstance(). If Pickr's CDN script is still loading, multiple instances'
-  // setTimeout retries can all resolve in the same tick once it becomes available —
-  // claiming then depends on setTimeout-queue order, not document order, which can
-  // pair a picker with the wrong trigger circle. Claiming here ties it strictly to
-  // script execution order, which Bubble does preserve regardless of load timing.
+  // Fix #29: div stays generic in markup — fieldName is the single source of truth.
+  // At parse time: grab the first unclaimed div, stamp data-field from fieldName,
+  // then mark it claimed. Re-query by identity so all subsequent lookups (including
+  // initPickrInstance retries) are position-independent and re-render-safe.
   var triggerEl = document.querySelector('.pickr-trigger-el:not([data-pickr-claimed])');
-  if (triggerEl) triggerEl.setAttribute('data-pickr-claimed', 'true');
+  if (triggerEl) {
+    triggerEl.setAttribute('data-field', fieldName);
+    triggerEl.setAttribute('data-pickr-claimed', 'true');
+  }
+  triggerEl = document.querySelector('.pickr-trigger-el[data-field="' + fieldName + '"]');
 
   function initPickrInstance() {
     if(typeof Pickr === 'undefined') return setTimeout(initPickrInstance, 100);
@@ -136,6 +138,14 @@
     if (!triggerEl) {
       if (window.PICKR_DEBUG) {
         console.warn('Pickr (' + fieldName + '): no unclaimed .pickr-trigger-el found - check instance count / re-render order.');
+      }
+      // Fix #4: don't fail silently in production. No matching trigger means this
+      // instance's swatch sits dead (no picker bound) with zero visible signal -
+      // a real risk if instance count ever grows past available .pickr-trigger-el
+      // divs. Best-effort: surface it to Bubble so it's debuggable from the app
+      // side without needing PICKR_DEBUG flipped on in the browser console.
+      if (typeof bubble_fn_colorData === 'function') {
+        bubble_fn_colorData(JSON.stringify({ field: fieldName, value: null, saved: false, error: 'no_trigger_found' }));
       }
       return;
     }
