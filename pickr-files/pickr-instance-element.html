@@ -1,4 +1,4 @@
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/themes/nano.min.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/themes/nano.min.css"/>
 <div class="pickr-trigger-el"></div>
 <style>
 .pickr-trigger-el{
@@ -69,59 +69,109 @@
 .pcr-app .pcr-interaction .pcr-type{
     display:none !important;
 }
+/* CANCEL button — outline/subtle style (Fix #20) */
 .pickr-save-btn-el{
     display:none;
     order:3;
     flex:1 1 100%;
     width:100%;
     margin-top:8px;
-    padding:8px 0;
+    padding:7px 0;
     border-radius:6px;
-    background:#D1D5DB;
-    color:#fff;
+    background:#F3F4F6;
+    color:#6B7280;
     font-size:12px;
     font-weight:600;
     letter-spacing:.03em;
-    cursor:not-allowed;
-    border:none;
-    outline:none;
-    transition:.15s;
-}
-.pickr-save-btn-el.pcr-dirty{
-    background:#2563EB;
     cursor:pointer;
+    border:1px solid #E5E7EB;
+    outline:none;
+    transition:background .15s, color .15s, border-color .15s;
 }
-.pickr-save-btn-el.pcr-dirty:hover{
-    background:#1d4ed8;
+.pickr-save-btn-el:hover{
+    background:#E5E7EB;
+    color:#374151;
+    border-color:#D1D5DB;
+}
+/* Auto-save tip note (Fix #20) */
+.pickr-tip-note-el{
+    display:none;
+    order:4;
+    flex:1 1 100%;
+    width:100%;
+    margin-top:6px;
+    font-size:10px;
+    font-weight:400;
+    color:#9CA3AF;
+    text-align:center;
+    line-height:1.4;
+    pointer-events:none;
+    user-select:none;
 }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/@simonwep/pickr/dist/pickr.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/pickr.min.js"></script>
 <script>
 (function() {
+
+  // Fix #27: global debug flag — gates console.warn noise in production.
+  // typeof guard because this script runs 10-15x per page (once per instance).
+  // A plain assignment would reset it to false on every instance, clobbering
+  // any `window.PICKR_DEBUG = true` you set in the console or a header element.
+  // Set it once; every later instance just reads it.
+  if (typeof window.PICKR_DEBUG === 'undefined') {
+    window.PICKR_DEBUG = false;
+  }
+
+  // ---- CHANGE THESE TWO VALUES PER INSTANCE ----
+  var rawColor = '#343882';     // current saved colour — swap for dynamic Bubble value
+  var fieldName = 'titleColor'; // unique per instance — must match Bubble workflow condition
+  // -----------------------------------------------
+
+  var instanceKey = 'pickr_' + fieldName;
+
+  // Fix #24: claim the trigger element immediately at script-parse time, NOT inside
+  // initPickrInstance(). If Pickr's CDN script is still loading, multiple instances'
+  // setTimeout retries can all resolve in the same tick once it becomes available —
+  // claiming then depends on setTimeout-queue order, not document order, which can
+  // pair a picker with the wrong trigger circle. Claiming here ties it strictly to
+  // script execution order, which Bubble does preserve regardless of load timing.
+  var triggerEl = document.querySelector('.pickr-trigger-el:not([data-pickr-claimed])');
+  if (triggerEl) triggerEl.setAttribute('data-pickr-claimed', 'true');
+
   function initPickrInstance() {
     if(typeof Pickr === 'undefined') return setTimeout(initPickrInstance, 100);
 
-    // ---- YAHAN PE BUBBLE KI DYNAMIC VALUE DAALO ----
-    var rawColor = '#343882';     // is field ki current colour - dynamic karo Bubble se
-    var fieldName = 'titleColor'; // is picker ka field name - har HTML element mein alag likho
-    // ------------------------------------------------
+    if (!triggerEl) {
+      if (window.PICKR_DEBUG) {
+        console.warn('Pickr (' + fieldName + '): no unclaimed .pickr-trigger-el found - check instance count / re-render order.');
+      }
+      return;
+    }
 
-    var instanceKey = 'pickr_' + fieldName;
-    var triggerEl = document.querySelector('.pickr-trigger-el');
-
-    if(window[instanceKey]) {
+    // Fix #25: run the old instance's cleanup() BEFORE destroying it, not just
+    // destroyAndRemove(). If the popup was open during a Bubble re-render, 'hide'
+    // never fired — so the keydown listener and any pending debounce timer are
+    // still live, holding a closure over the now-dead pickr instance.
+    if (window[instanceKey] && window[instanceKey + '_cleanup']) {
+      window[instanceKey + '_cleanup']();
+    }
+    if (window[instanceKey]) {
       window[instanceKey].destroyAndRemove();
       window[instanceKey] = null;
     }
+    // Fix #26: delete the stale cleanup reference immediately after destroy — don't
+    // leave a dead closure on window until the new one overwrites it below.
+    delete window[instanceKey + '_cleanup'];
 
-    var defaultColor = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawColor) ? rawColor : '#2563EB';
-    var dynamicPosition = 'left-middle';
-
+    // Fix #22: regex accepts 8-digit hex (#RRGGBBAA) — what toHEXA() returns when
+    // opacity < 100%. Old regex only matched 3/6-digit, so any saved colour with
+    // opacity would silently fall back to #2563EB on the next page load.
+    var defaultColor = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.test(rawColor) ? rawColor : '#2563EB';
     const pickr = Pickr.create({
       el: triggerEl,
       theme: 'nano',
       default: defaultColor,
-      position: dynamicPosition,
+      position: 'left-middle',
       hideOnSelect: false,
       autoReposition: true,
       swatches: ['#2563EB','#3B82F6','#06B6D4','#10B981','#22C55E','#F59E0B','#EF4444','#EC4899','#8B5CF6','#A855F7','#14B8A6','#84CC16','#F97316','#6366F1'],
@@ -135,107 +185,160 @@
 
     window[instanceKey] = pickr;
 
-    var savedThisSession = false;
-    var pickrDefaultHexStr = '';
-    var debounceTimer = null;
-
-    function lockTriggerColor(colour) {
-      const btn = pickr.getRoot().button;
-      if (!btn) return;
-      const rgba = colour.toRGBA();
-      btn.style.setProperty('--trigger-color', `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`);
-    }
-
-    function updateSaveButtonState() {
-      var result = pickr.getRoot().interaction.result;
-      var saveBtn = result ? result.parentElement.querySelector('.pickr-save-btn-el') : null;
-      if (!saveBtn) return;
-      var current = pickr.getColor();
-      if (!current) return;
-      var currentHex = current.toHEXA().toString().toUpperCase();
-      if (currentHex === pickrDefaultHexStr) {
-        saveBtn.classList.remove('pcr-dirty');
-      } else {
-        saveBtn.classList.add('pcr-dirty');
+    // Fix #27: guard every Bubble bridge call via safeBubbleSend(). If the Toolbox
+    // JavascripttoBubble element hasn't initialized yet on first page load, calling
+    // bubble_fn_colorData() directly throws a ReferenceError — which inside 'hide'
+    // means the save is silently dropped with no visible error.
+    function safeBubbleSend(payload) {
+      if (typeof bubble_fn_colorData === 'function') {
+        bubble_fn_colorData(JSON.stringify(payload));
+      } else if (window.PICKR_DEBUG) {
+        console.warn('Pickr (' + fieldName + '): bubble_fn_colorData not ready yet, payload dropped:', payload);
       }
     }
 
+    // Fix #18: tracks whether this popup session was explicitly cancelled (button or
+    // Escape) so 'hide' knows to skip auto-save. Reset to false on each hide.
+    var cancelledThisSession = false;
+    var debounceTimer = null;
+
+    // Fix #5: null-guard getRoot() and color. A fast Bubble re-render can call this
+    // against a half-torn-down instance — without the guard it would throw and abort
+    // the save, leaving the trigger swatch showing the wrong colour.
+    function lockTriggerColor(color) {
+      var root = pickr.getRoot();
+      var btn = root && root.button;
+      if (!btn || !color) return;
+      const rgba = color.toRGBA();
+      btn.style.setProperty('--trigger-color', `rgba(${Math.round(rgba[0])}, ${Math.round(rgba[1])}, ${Math.round(rgba[2])}, ${rgba[3]})`);
+    }
+
+    // Fix #18: shared cancel routine — used by the CANCEL button AND the Escape
+    // listener. Reverts colour + swatch, sends saved:false to Bubble to undo any
+    // live-preview state. clearTimeout ensures no stale debounce fires after this.
+    function runCancel() {
+      cancelledThisSession = true;
+      clearTimeout(debounceTimer); // kill any in-flight 500ms preview send
+
+      // Fix #23: silent=true prevents Pickr firing its internal 'change' event here,
+      // which would schedule a new debounce send right in the middle of a cancel.
+      pickr.setColor(defaultColor, true);
+      lockTriggerColor(pickr.getColor());
+
+      var revertPayload = { field: fieldName, value: defaultColor, saved: false };
+      safeBubbleSend(revertPayload);
+    }
+
+    // Fix #19: Escape-as-Cancel, scoped per-instance. Pickr's own Escape handler
+    // just closes the popup without cancelling — this intercepts first, runs
+    // runCancel(), then lets Pickr close it. The 'hide' handler sees
+    // cancelledThisSession=true and skips auto-save.
+    // Attached on 'show', removed on 'hide' — never more than one listener active
+    // per instance at a time, and no stacking across 10-15 instances.
+    function handleEscapeAsCancel(e) {
+      if (e.key !== 'Escape') return;
+      runCancel();
+      // No pickr.hide() call here - Pickr's own Escape handling closes it.
+    }
+
+    // Fix #3 & #6: central cleanup — called from both 'hide' (normal close) and
+    // pre-destroy (Bubble re-render while popup was open, so 'hide' never fires).
+    // Removes the Escape keydown listener and kills any pending debounce timer.
+    // Without this, both can outlive the instance they belong to.
+    function cleanup() {
+      document.removeEventListener('keydown', handleEscapeAsCancel);
+      clearTimeout(debounceTimer);
+    }
+    window[instanceKey + '_cleanup'] = cleanup;
+
     pickr.on('init', (instance) => {
       lockTriggerColor(instance.getColor());
-      pickrDefaultHexStr = instance.getColor().toHEXA().toString().toUpperCase();
 
       var result = pickr.getRoot().interaction.result;
       var interaction = result ? result.parentElement : null;
       if(interaction) {
+        // Guard: remove stale CANCEL button on re-init (Fix #13)
         var existingBtn = interaction.querySelector('.pickr-save-btn-el');
         if (existingBtn) existingBtn.remove();
 
-        var saveBtn = document.createElement('button');
-        saveBtn.className = 'pickr-save-btn-el';
-        saveBtn.textContent = 'SAVE';
-        saveBtn.onclick = function() {
-          var selected = pickr.getColor();
-          if(selected) {
-            var hexValue = selected.toHEXA().toString();
-            if(hexValue && hexValue !== '' && hexValue !== '#') {
-              savedThisSession = true;
-              lockTriggerColor(selected);
-              pickrDefaultHexStr = hexValue.toUpperCase();
-              defaultColor = hexValue;
-              updateSaveButtonState();
+        // Guard: remove stale tip note on re-init (Fix #20)
+        var existingNote = interaction.querySelector('.pickr-tip-note-el');
+        if (existingNote) existingNote.remove();
 
-              // saved: true — Bubble rawColor update krega
-              var payload = { field: fieldName, value: hexValue, saved: true };
-              bubble_fn_colorData(JSON.stringify(payload));
-
-              pickr.hide();
-            }
-          }
+        // Fix #18: SAVE button repurposed to CANCEL.
+        // Always enabled - no dirty/clean state needed anymore since
+        // closing the popup normally now auto-saves.
+        // Outline/subtle style applied via CSS (Fix #20).
+        var cancelBtn = document.createElement('button');
+        cancelBtn.className = 'pickr-save-btn-el';
+        cancelBtn.textContent = 'CANCEL';
+        cancelBtn.onclick = function() {
+          runCancel();
+          pickr.hide(); // explicit close after cancel - triggers 'hide' below, which will no-op on auto-save
         };
-        interaction.appendChild(saveBtn);
-        saveBtn.style.display = 'block';
-        updateSaveButtonState();
+        interaction.appendChild(cancelBtn);
+        cancelBtn.style.display = 'block';
+
+        // Fix #20: Auto-save tip note — injected directly after CANCEL button.
+        // pointer-events:none and user-select:none keep it purely decorative.
+        var tipNote = document.createElement('p');
+        tipNote.className = 'pickr-tip-note-el';
+        tipNote.textContent = 'Changes save automatically when you close this picker.';
+        interaction.appendChild(tipNote);
+        tipNote.style.display = 'block';
       }
     });
 
     pickr.on('change', () => {
-      updateSaveButtonState();
-
-      // 500ms debounce se live preview colour Bubble ko bhejo
-      // saved: false — sirf preview workflow chalega, rawColor update nahi hoga
+      // Debounced live preview — sends saved:false so only Workflow 1 fires,
+      // colorHex/rawColor stay untouched until a real save.
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         var current = pickr.getColor();
         if (!current) return;
-        var hexValue = current.toHEXA().toString();
-        if (hexValue && hexValue !== '' && hexValue !== '#') {
-          var payload = { field: fieldName, value: hexValue, saved: false };
-          bubble_fn_colorData(JSON.stringify(payload));
+        var colorHex = current.toHEXA().toString();
+        if (colorHex && colorHex !== '' && colorHex !== '#') {
+          var payload = { field: fieldName, value: colorHex, saved: false };
+          safeBubbleSend(payload);
         }
       }, 500);
     });
 
-    // Popup open hone par pointer events restore karo
+    // Restore pointer events on open + attach Escape listener.
     pickr.on('show', () => {
       var app = pickr.getRoot().app;
       if (app) app.style.pointerEvents = '';
+      document.addEventListener('keydown', handleEscapeAsCancel);
     });
 
     pickr.on('hide', () => {
-      // Pending debounce cancel karo - popup close hone ke baad stale value na jaaye Bubble ko
-      clearTimeout(debounceTimer);
+      // Detach Escape listener + clear pending debounce — shared cleanup path.
+      cleanup();
 
-      // Poore popup ke pointer events band - cursor glitch kisi bhi element pe na aaye
+      // Disable pointer events on the popup so no cursor glitch bleeds onto elements below.
       var app = pickr.getRoot().app;
       if (app) app.style.pointerEvents = 'none';
 
-      if(!savedThisSession) {
-        pickr.setColor(defaultColor);
-        // Bubble custom state ko bhi last saved colour pe revert karo
-        var revertPayload = { field: fieldName, value: defaultColor, saved: false };
-        bubble_fn_colorData(JSON.stringify(revertPayload));
+      if (cancelledThisSession) {
+        // Already reverted + sent saved:false in runCancel(). Don't auto-save on top of it.
+        cancelledThisSession = false;
+        return;
       }
-      savedThisSession = false;
+
+      // Fix #18: Auto-save on close. Any normal dismiss (outside click etc.) is treated
+      // as a confirmed save. defaultColor updated here so the next open starts from the
+      // new colour — intentional mutation, re-synced by Bubble on re-render anyway.
+      var current = pickr.getColor();
+      if (!current) return;
+      var colorHex = current.toHEXA().toString();
+      if (!colorHex || colorHex === '' || colorHex === '#') return;
+
+      lockTriggerColor(current);
+      defaultColor = colorHex;
+
+      // saved: true — Bubble updates colorHex/rawColor (Workflow 2 condition).
+      var savePayload = { field: fieldName, value: colorHex, saved: true };
+      safeBubbleSend(savePayload);
     });
   }
 
