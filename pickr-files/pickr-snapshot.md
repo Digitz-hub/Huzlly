@@ -1,7 +1,7 @@
 # Pickr Color Picker — Bubble.io Integration — Snapshot
 
 **Last updated:** June 26, 2026
-**Fixes covered:** #1–27 + housekeeping pass + UI polish pass (see session log below)
+**Fixes covered:** #1–29 + housekeeping pass + UI polish pass (see session log below)
 
 ---
 
@@ -27,7 +27,7 @@ Bubble.io project using a self-contained HTML element with the Pickr (`@simonwep
 ## Architecture overview
 
 Each instance runs inside an IIFE. On script parse:
-1. Immediately claims its trigger `.pickr-trigger-el` div via `data-pickr-claimed` attribute (Fix #24)
+1. Stamps `data-field` from `fieldName` onto the first unclaimed `.pickr-trigger-el` div, then marks it claimed — both at parse time (Fixes #24, #29)
 2. Calls `initPickrInstance()`, which retries every 100ms until `Pickr` is available on `window`
 3. On re-init, runs `cleanup()` on the old instance before destroying it (Fixes #25, #26)
 
@@ -49,7 +49,7 @@ Bubble workflow trigger: `When JavascripttoBubble colorData has an event`
 
 **Fix:** claim-the-next-unclaimed pattern. Each instance grabs the first `.pickr-trigger-el:not([data-pickr-claimed])` and immediately marks it claimed. Relies only on Bubble preserving script execution order (confirmed true).
 
-**Watch for:** if a parent Reusable Element re-renders all instance scripts simultaneously, claimed markers could reset and re-claim out of order. Not observed, but retest if instance count grows.
+**Watch for:** if a parent Reusable Element re-renders all instance scripts simultaneously, claimed markers could reset and re-claim out of order. Not observed. *(Superseded by Fix #29 — ordering assumption fully eliminated.)*
 
 ---
 
@@ -96,6 +96,30 @@ If Bubble re-rendered while a popup was open, `hide` never fired. The Escape `ke
 
 ---
 
+### #28 Silent failure on missing trigger element
+Previously, if an instance's script ran but found no unclaimed `.pickr-trigger-el` (e.g. instance count grows past available trigger divs, or a div is accidentally deleted/mistyped when adding a new field), the only signal was a `console.warn` gated behind `PICKR_DEBUG` — invisible in production. The picker simply never bound and the trigger circle sat dead, with zero way to detect this without manually opening the console.
+
+**Fix:** when no unclaimed trigger is found, the instance now also sends a payload to Bubble via `bubble_fn_colorData`: `{ field: fieldName, value: null, saved: false, error: 'no_trigger_found' }`. This is additive only — `value: null` means it won't satisfy existing Workflow 1/2 conditions (which expect a real hex string), so current workflows are unaffected. Intended to be picked up by a separate, optional dev-facing workflow (e.g. an error log table or notification) — not surfaced to end users, since this is a setup-level issue (missing/mismatched trigger div) that only a developer can fix, not something an end user causes or can act on.
+
+**Root causes to avoid (so this should rarely fire):**
+- Copying only the `<script>` block when adding a new field and forgetting the accompanying `<div class="pickr-trigger-el">` markup
+- Manually typing the `pickr-trigger-el` class name instead of copy-pasting (typo risk)
+- Adding a new script instance without a 1:1 matching trigger div (mismatched instance count vs. div count)
+- Placing the trigger div inside conditional visibility logic that can leave it absent from the DOM at script-parse time
+
+---
+
+### #29 ⭐ Trigger pairing made fully order-independent
+Fix #21's claim-the-next-unclaimed pattern still had one theoretical failure mode: if a parent Reusable Element triggered a simultaneous re-render of multiple instances, scripts could resolve in microtask/setTimeout order rather than document order — pairing script A with trigger B. Additionally, adding a new instance required updating `data-field` in the markup *and* `fieldName` in the script — two values that had to stay in sync manually.
+
+**Fix:** `fieldName` is now the single source of truth. At parse time, the script grabs the first unclaimed `.pickr-trigger-el`, stamps `data-field` from `fieldName` onto it, marks it claimed, then re-queries by identity (`[data-field="..."]`). The div in markup stays generic — no `data-field` attribute to maintain. All subsequent lookups, including `initPickrInstance()` retries, are position-independent.
+
+**Per-instance editing is now exactly 2 values** — `rawColor` and `fieldName` — same as before, with no third value to keep in sync.
+
+**Why the first unclaimed grab is still safe here:** the initial stamp still uses positional order, but it's synchronous at parse time (same as Fix #24) and only runs once per instance. After stamping, identity takes over entirely — re-renders query by `data-field`, not position, so the ordering assumption doesn't persist.
+
+---
+
 ### Housekeeping pass (no logic changes)
 - `dynamicPosition` variable removed — `'left-middle'` inlined directly into `Pickr.create()`
 - All Hindi inline comments replaced with English
@@ -118,7 +142,7 @@ If Bubble re-rendered while a popup was open, `hide` never fired. The Escape `ke
 
 | Risk | Why accepted |
 |---|---|
-| `defaultColor` mutated in-memory on save | Safe — Bubble re-render resyncs `rawColor` on every confirmed save. Only a problem if re-render doesn't fire AND user cancels in the same session. Not observed. |
+| `defaultColor` mutated in-memory on save | Safe — Bubble re-render resyncs `rawColor` on every confirmed save. Only a problem if re-render doesn't fire AND user cancels in the same session. Not observed. Also self-correcting even without re-render: `defaultColor` is updated in-memory on every confirmed save regardless, so saving the same colour twice in one session still leaves the correct revert point. |
 | `safeBubbleSend` drops payload silently if bridge not ready | Race window is too small to hit in practice — user can't open the picker before `bubble_fn_colorData` is ready. Guard prevents a crash; no retry needed. |
 | `position: 'left-middle'` hardcoded | `autoReposition: true` handles viewport edge cases. At worst a cosmetic flash. |
 | Explicit `pickr.hide()` after `runCancel()` in CANCEL handler | No double-fire currently. CDN pinning mitigates forward-compat risk if Pickr's event semantics change. |
@@ -127,15 +151,19 @@ If Bubble re-rendered while a popup was open, `hide` never fired. The Escape `ke
 
 ## ⚠️ Needs live testing
 
-- [ ] Trigger pairing across all 10–15 instances — re-verify after Fix #24 (claim moved to parse time)
+- [ ] Trigger pairing across all 10–15 instances — re-verify after Fix #29 (identity-based stamp)
 - [ ] Destroy-while-open scenario (force a Reusable Element re-render mid-edit) — confirm no stray Escape behaviour or stale save afterward (Fix #26)
+- [ ] **Combined case:** destroy-while-open + simultaneous re-render across multiple instances at once — checks whether claimed markers reset and trigger pairing breaks (overlap of Fix #21's watch-for and Fix #26)
+- [ ] Save the same colour twice in one session (no Bubble re-render in between), then cancel — confirm revert lands on the second save's colour, not a stale one
 - [ ] Colour with opacity < 100% survives a full page reload (Fix #22)
 - [ ] CANCEL/Escape revert sends no stale debounce payload after the revert (Fix #23)
 - [ ] `window.PICKR_DEBUG = true` in console re-enables both warning types
 - [x] Multi-instance trigger pairing — verified working on a real Bubble page (Fix #21)
+- [ ] Trigger pairing under simultaneous re-render of multiple instances — confirm Fix #29 eliminates the ordering failure mode (Fix #29)
 - [ ] Normal outside-click close → `saved: true` fires, `colorHex`/`rawColor` update correctly
 - [ ] CANCEL button → revert + close, no auto-save double-fire
 - [ ] Escape → identical behaviour to CANCEL
 - [ ] Escape listener removed on `hide` — only one active listener at a time across all instances
 - [ ] Trigger circle colour does not change mid-drag, only on auto-save or cancel-revert
 - [ ] No duplicate CANCEL button on parent Reusable Element re-render
+- [ ] Force a missing-trigger scenario (delete/rename a `.pickr-trigger-el` div on one instance) — confirm `bubble_fn_colorData` receives `error: 'no_trigger_found'` and existing workflows ignore it without side effects (Fix #28)
