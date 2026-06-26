@@ -1,182 +1,134 @@
-# Pickr Color Picker — Bubble.io Setup Guide
+# Pickr Color Picker — Bubble.io Integration — Snapshot
 
-A lightweight, customizable color picker built with the [Pickr](https://github.com/Simonwep/pickr) library, designed to work seamlessly inside Bubble.io as a self-contained HTML element. Each instance is fully independent — meaning you can have multiple color pickers on the same page (e.g. Title Color, Text Color, Background Color) without any conflicts.
-
-**UX model:** the picker **auto-saves when closed** (clicking outside, or pressing Escape with no explicit cancel). A **CANCEL** button is available inside the popup if the user wants to discard their changes and revert to the last saved color instead.
-
-> **Latest update (June 26, 2026):** internal JS robustness fixes only (trigger-claim timing, guarded Bubble bridge calls, listener/timer cleanup on destroy, null-safe color locking, pinned Pickr CDN version, debug-gated console warnings). **No change to Bubble-side setup** — workflows, regex patterns, and JS-to-Bubble config below are still accurate. See `pickr-snapshot.md` for full details.
-
-The full code (`pickr-instance-element.html`) and session notes (`pickr-bubble-snapshot.md`) are available in this repository: **[GitHub link — coming soon]**
+**Last updated:** June 26, 2026
+**Fixes covered:** #1–27 + housekeeping pass (see session log below)
 
 ---
 
-## Prerequisites
+## Project context
 
-- **Toolbox plugin** installed in your Bubble app. Search for "Toolbox" in the Bubble Plugin Marketplace and install it — it's free.
+Bubble.io project using a self-contained HTML element with the Pickr (`@simonwep/pickr@1.9.1`) colour picker library. Multiple instances of this HTML element exist on the same page inside a Reusable Element — one per editable colour field (e.g. `titleColor`, `textColor`, `bgColor`), duplicated 10–15 times.
+
+**Files:**
+- `pickr-instance-element.html` — the full per-instance code (only `rawColor` and `fieldName` change between instances)
+- `README.md` — Bubble setup guide (HTML element, Toolbox plugin, workflows)
+- `pickr-snapshot.md` — this file
+
+**Key design decisions:**
+- Auto-save on popup close (outside click) — no SAVE button
+- CANCEL button and Escape key both revert to last confirmed save and send `saved: false`
+- `colorHex` custom state on each HTML element holds the last confirmed saved colour — only updated on `saved: true` to prevent Bubble re-rendering the element mid-edit and destroying the picker
+- One `JavascripttoBubble` element (`colorData` suffix) handles all instances on the page
+- `bubble_fn_colorData` guard (`safeBubbleSend`) prevents a ReferenceError if the Toolbox element hasn't initialized yet on first page load — payload is dropped silently but this race window is too small to matter in practice (user can't reach the picker before the bridge is ready)
+- `defaultColor` is intentionally mutated on each confirmed save as an in-memory cache — safe because Bubble re-renders resync `rawColor` on every save anyway
 
 ---
 
-## Step 1 — Add the HTML Element and Create a Custom State
+## Architecture overview
 
-Add a standard **HTML** element to your Bubble page where you want the color picker trigger circle to appear.
+Each instance runs inside an IIFE. On script parse:
+1. Immediately claims its trigger `.pickr-trigger-el` div via `data-pickr-claimed` attribute (Fix #24)
+2. Calls `initPickrInstance()`, which retries every 100ms until `Pickr` is available on `window`
+3. On re-init, runs `cleanup()` on the old instance before destroying it (Fixes #25, #26)
 
-Set the HTML element's size to exactly **24px wide and 24px tall**. The trigger circle is sized to fit these dimensions — changing them will break the layout.
+On `init`: injects CANCEL button and tip note into Pickr's interaction panel.
+On `show`: attaches scoped `keydown` listener for Escape-as-cancel.
+On `change`: debounced 500ms send to Bubble with `saved: false`.
+On `hide`: runs `cleanup()`, then either skips (if cancelled) or auto-saves with `saved: true`.
 
-Next, create a custom state on this HTML element:
+Bubble workflow trigger: `When JavascripttoBubble colorData has an event`
+- Action 1 (all payloads): updates the target element's colour state — condition on `field` value
+- Action 2 (`saved: true` only): updates `colorHex` on the HTML element — condition on `field` + `saved`
 
-| Field | Value |
+---
+
+## Fix log
+
+### #21 ⭐ Multi-instance trigger pairing
+`document.querySelector('.pickr-trigger-el')` matched the same first element on the page for every instance. `document.currentScript.parentElement` didn't work either — Bubble relocates `<script>` tags so `parentElement` doesn't contain the picker's own div.
+
+**Fix:** claim-the-next-unclaimed pattern. Each instance grabs the first `.pickr-trigger-el:not([data-pickr-claimed])` and immediately marks it claimed. Relies only on Bubble preserving script execution order (confirmed true).
+
+**Watch for:** if a parent Reusable Element re-renders all instance scripts simultaneously, claimed markers could reset and re-claim out of order. Not observed, but retest if instance count grows.
+
+---
+
+### #22 Hex-with-opacity validation
+`toHEXA()` returns 8-digit hex (`#RRGGBBAA`) when opacity < 100%. Old regex only matched 3/6-digit, so any saved colour with opacity silently fell back to `#2563EB` on next page load.
+
+**Fix:** regex updated to also accept 8-digit hex.
+
+---
+
+### #23 Cancel revert re-entered the debounce pipeline
+`runCancel()` called `pickr.setColor(defaultColor)` without the `silent` flag, firing Pickr's internal `change` event and scheduling a new debounce send mid-cancel.
+
+**Fix:** `pickr.setColor(defaultColor, true)` — silent flag prevents the change event.
+
+---
+
+### #24 ⭐ Trigger claim moved to script-parse time
+Fix #21's claim ran inside `initPickrInstance()`, which is delayed by the Pickr-availability retry loop. Multiple instances polling simultaneously could resolve in setTimeout-queue order, not document order — wrong trigger pairing.
+
+**Fix:** claim moved to synchronous script-parse time, before the retry loop starts.
+
+---
+
+### #25 Stale cleanup reference on re-init
+Old `window[instanceKey + '_cleanup']` reference was left on `window` until the new cleanup overwrote it — small window where a dead closure sat referenced for no reason.
+
+**Fix:** `delete window[instanceKey + '_cleanup']` immediately after `destroyAndRemove()`.
+
+---
+
+### #26 ⭐ Listener + timer leak on destroy-while-open
+If Bubble re-rendered while a popup was open, `hide` never fired. The Escape `keydown` listener and any pending debounce timer stayed alive, holding a closure over the now-dead instance. The listener would misfire on every future Escape press; the timer could send a stale payload.
+
+**Fix:** `cleanup()` function centralizes both removals — called from `hide` (normal path) and explicitly before `destroyAndRemove()` on re-init (abnormal path).
+
+---
+
+### #27 Production resilience (4 sub-fixes)
+- `safeBubbleSend()` guards every `bubble_fn_colorData` call against a ReferenceError if the Toolbox element isn't ready yet
+- Null-guards in `lockTriggerColor()` around `getRoot()` and the `color` argument
+- CDN pinned to `@simonwep/pickr@1.9.1` explicitly
+- `console.warn` calls gated behind `window.PICKR_DEBUG` (defaults `false`, set once via typeof guard so 10–15 instances don't clobber each other)
+
+---
+
+### Housekeeping pass (no logic changes)
+- `dynamicPosition` variable removed — `'left-middle'` inlined directly into `Pickr.create()`
+- All Hindi inline comments replaced with English
+- All block comments tightened and consistent
+- Fix #27's comment in HTML corrected (was incorrectly labelled #2)
+- Local variable `hexValue` in `change` and `hide` handlers renamed to `colorHex` to match the Bubble custom state name
+- Bubble custom state renamed from `hexValue` to `colorHex` — README updated throughout
+- Tip note text updated: `Changes save automatically when you close this picker.`
+
+---
+
+## Known accepted risks
+
+| Risk | Why accepted |
 |---|---|
-| State name | `colorHex` |
-| Type | `text` |
-
-**Why `colorHex` on the HTML element itself?**
-The code reads `rawColor` (the current saved color) as a dynamic value from this element's own `colorHex` state. This state is only updated when the popup is closed normally (auto-save fires `saved: true` from JavaScript). If it updated on every color drag or preview, Bubble would re-render the HTML element on every change — which would destroy the Pickr instance and close the popup mid-use. Keeping `colorHex` stable until the popup actually closes prevents this entirely.
-
----
-
-## Step 2 — Paste the Code
-
-Copy the full code from `pickr-instance-element.html` in this repository and paste it into the HTML element's content field in Bubble.
-
-There are **two values you must change** for every instance:
-
-### `rawColor`
-```javascript
-var rawColor = '#343882'; // Replace with dynamic value
-```
-This is the current saved color that the picker loads with on open. Set this to the `colorHex` custom state of this HTML element dynamically using Bubble's expression editor:
-
-> `This HTMLElement's colorHex`
-
-If `colorHex` is empty (first load, no color saved yet), the code automatically falls back to `#2563EB` (blue) as the default. You can change this fallback color directly in the code if needed.
-
-### `fieldName`
-```javascript
-var fieldName = 'titleColor'; // Replace with a unique identifier
-```
-This is a unique string that identifies which color picker is sending data to Bubble. Every instance on the page **must have a different `fieldName`** — otherwise Bubble workflows won't be able to tell which picker triggered the event.
-
-Use a clear, descriptive name with no spaces. Examples:
-- `titleColor`
-- `textColor`
-- `bgColor`
-- `borderColor`
-
-> ⚠️ `fieldName` is case-sensitive. Whatever string you set here must match exactly in your Bubble workflow conditions.
+| `defaultColor` mutated in-memory on save | Safe — Bubble re-render resyncs `rawColor` on every confirmed save. Only a problem if re-render doesn't fire AND user cancels in the same session. Not observed. |
+| `safeBubbleSend` drops payload silently if bridge not ready | Race window is too small to hit in practice — user can't open the picker before `bubble_fn_colorData` is ready. Guard prevents a crash; no retry needed. |
+| `position: 'left-middle'` hardcoded | `autoReposition: true` handles viewport edge cases. At worst a cosmetic flash. |
+| Explicit `pickr.hide()` after `runCancel()` in CANCEL handler | No double-fire currently. CDN pinning mitigates forward-compat risk if Pickr's event semantics change. |
 
 ---
 
-## Step 3 — Add the JavascripttoBubble Element
+## ⚠️ Needs live testing
 
-From the Toolbox plugin, add a **JavascripttoBubble** element anywhere on the page. You only need **one** — it handles all color picker instances on the page.
-
-Configure it with the following settings:
-
-| Setting | Value |
-|---|---|
-| Suffix | `colorData` |
-| Trigger event | ✅ On |
-| Publish value | ✅ On |
-| Value type | `Text` |
-
-**Why these settings?**
-Every time the user drags a color (live preview), closes the popup normally (auto-save), clicks CANCEL, or presses Escape, the picker sends a JSON string to Bubble through this element. The `colorData` suffix matches the `bubble_fn_colorData(...)` call in the JavaScript code. Trigger event and Publish value must both be ON so Bubble can detect the event and read the value in a workflow.
-
-**What the payload looks like:**
-
-On every color change (live drag, 500ms debounced):
-```json
-{ "field": "titleColor", "value": "#FF5733", "saved": false }
-```
-
-On closing the popup normally (outside click — **this is now the Save trigger**):
-```json
-{ "field": "titleColor", "value": "#FF5733", "saved": true }
-```
-
-On clicking **CANCEL**, or pressing **Escape**:
-```json
-{ "field": "titleColor", "value": "#343882", "saved": false }
-```
-Both CANCEL and Escape revert the picker to its `defaultColor` (last saved colour), lock the trigger swatch back to that colour, and send `saved: false` to revert Bubble's live-preview state (Workflow 1). The popup then closes — but because this was an explicit cancel, the close itself does **not** also fire an auto-save. A pending debounce (from an in-progress drag) is also cancelled first, so no stale preview value sneaks through after closing.
-
-**Extracting values in Bubble using Regex:**
-
-Use Bubble's `extract with Regex` operator (`:first item`) to pull individual values out of the JSON string:
-
-| Value | Regex pattern |
-|---|---|
-| `field` | `(?<="field":")[^"]+` |
-| `value` | `(?<="value":")[^"]+` |
-| `saved` | `(?<="saved":)(true\|false)` |
-
----
-
-## Step 4 — Set Up Bubble Workflows
-
-All color picker instances share a **single workflow trigger**:
-
-> **Trigger:** `When JavascripttoBubble colorData has an event`
-
-Inside this one trigger, you add **2 actions per color picker instance**. So if you have 3 instances (`titleColor`, `textColor`, `bgColor`), you'll have 6 actions total — all inside the same trigger.
-
-Here's how to set up the 2 actions for each instance:
-
----
-
-### Action 1 — Update your target element's color state
-
-This action fires on every payload — live preview (drag), cancel/Escape revert, and auto-save on close. It updates whichever element or state you want the selected color to apply to — for example, a custom state on a parent group, a reusable element, or a data type field.
-
-| Field | Value |
-|---|---|
-| Element | The element where you want the color applied (e.g. `1 - Proposal`) |
-| Custom state | The state that holds the color value (e.g. `Title Color`) |
-| Value | `This JavascripttoBubble's value:extract with Regex:first item` — using the `value` regex pattern |
-| Only when | `This JavascripttoBubble's value:extract with Regex:first item` **is** `titleColor` — using the `field` regex pattern |
-
-**Why no `saved` check here?**
-This action runs on all `saved: false` payloads (live drag preview, cancel/Escape revert) and `saved: true` (auto-save on close) — so the color updates in real time as the user drags, reverts correctly on cancel, and stays correct after a normal close. The `field` condition ensures only the right picker updates the right state.
-
----
-
-### Action 2 — Update the HTML element's `colorHex` state
-
-This action only fires when the popup is **auto-saved on close** (`saved: true`) — i.e. the user closed the popup normally rather than hitting CANCEL or Escape. It updates the `colorHex` custom state on the HTML element itself — which feeds back into `rawColor` in the code, locking the picker's starting color for the next open.
-
-| Field | Value |
-|---|---|
-| Element | The HTML element for this picker (e.g. `Title Colour - Picker`) |
-| Custom state | `colorHex` |
-| Value | `This JavascripttoBubble's value:extract with Regex:first item` — using the `value` regex pattern |
-| Only when | `This JavascripttoBubble's value:extract with Regex:first item` **is** `titleColor` (field regex) **and** `This JavascripttoBubble's value:extract with Regex:first item` **is** `true` (saved regex) |
-
-**Why the `saved: true` condition?**
-If `colorHex` updated on every drag or cancel, Bubble would re-render the HTML element — destroying the Pickr instance and closing the popup mid-use. Restricting this to `saved: true` keeps the popup stable during live preview, and ensures a CANCEL/Escape revert payload (`saved: false`) never accidentally overwrites the last confirmed saved colour.
-
-> **No change needed if migrating from the old SAVE-button version** — this action's condition was already `saved: true`. Only the *trigger* for that payload moved (from a button click to a normal popup close); the Bubble-side condition stays identical.
-
----
-
-### Adding more instances
-
-For each additional color picker (e.g. `textColor`, `bgColor`), add another pair of Action 1 + Action 2 inside the **same trigger** — just change the `fieldName` in the `Only when` conditions to match that instance's `fieldName`.
-
----
-
-## Using Multiple Instances
-
-You can add as many color picker instances to the same page as you need — each one is a separate HTML element with its own `colorHex` custom state and a unique `fieldName` in the code.
-
-**Important:** Keep the number of simultaneously **visible** color picker instances to **4–5 at most**. Beyond that, Bubble may struggle to handle multiple Pickr instances rendering at the same time, which can cause pickers to break or behave unexpectedly. If you have more than 5 color pickers on a page, consider showing them in separate groups or sections so only a few are visible at any given time.
-
-A single JavascripttoBubble element (`colorData`) handles all instances — you do not need to add more than one.
-
-**Summary for each new instance:**
-- Add a new HTML element (24×24px)
-- Create a `colorHex` custom state on it (type: text)
-- Paste the full code
-- Set `rawColor` to `This HTMLElement's colorHex`
-- Set a unique `fieldName` string
-- Everything else in the code stays identical
-- 
+- [ ] Trigger pairing across all 10–15 instances — re-verify after Fix #24 (claim moved to parse time)
+- [ ] Destroy-while-open scenario (force a Reusable Element re-render mid-edit) — confirm no stray Escape behaviour or stale save afterward (Fix #26)
+- [ ] Colour with opacity < 100% survives a full page reload (Fix #22)
+- [ ] CANCEL/Escape revert sends no stale debounce payload after the revert (Fix #23)
+- [ ] `window.PICKR_DEBUG = true` in console re-enables both warning types
+- [x] Multi-instance trigger pairing — verified working on a real Bubble page (Fix #21)
+- [ ] Normal outside-click close → `saved: true` fires, `colorHex`/`rawColor` update correctly
+- [ ] CANCEL button → revert + close, no auto-save double-fire
+- [ ] Escape → identical behaviour to CANCEL
+- [ ] Escape listener removed on `hide` — only one active listener at a time across all instances
+- [ ] Trigger circle colour does not change mid-drag, only on auto-save or cancel-revert
+- [ ] No duplicate CANCEL button / tip note on parent Reusable Element re-render
