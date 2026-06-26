@@ -39,6 +39,12 @@
     flex-wrap:nowrap !important;
     justify-content:space-between !important;
 }
+.pcr-app{
+    border-radius:12px !important;
+    border:1px solid #e0e0e0 !important;
+    box-shadow:0 4px 16px rgba(0,0,0,.10) !important;
+    overflow:hidden;
+}
 .pcr-app .pcr-interaction .pcr-result,
 .pcr-app .pcr-interaction .pcr-type,
 .pcr-app .pcr-swatches button,
@@ -69,45 +75,31 @@
 .pcr-app .pcr-interaction .pcr-type{
     display:none !important;
 }
-/* CANCEL button — outline/subtle style (Fix #20) */
+/* CANCEL button (Fix #20) */
 .pickr-save-btn-el{
     display:none;
     order:3;
     flex:1 1 100%;
     width:100%;
     margin-top:8px;
-    padding:7px 0;
-    border-radius:6px;
-    background:#F3F4F6;
-    color:#6B7280;
+    padding:10px 24px;
+    border-radius:8px;
+    background:#ffffff;
+    color:#9e9e9e;
     font-size:12px;
     font-weight:600;
     letter-spacing:.03em;
     cursor:pointer;
-    border:1px solid #E5E7EB;
+    border:1px solid #e0e0e0;
     outline:none;
-    transition:background .15s, color .15s, border-color .15s;
+    transition:all .3s ease;
 }
 .pickr-save-btn-el:hover{
-    background:#E5E7EB;
-    color:#374151;
-    border-color:#D1D5DB;
+    background:#ffffff;
+    border-color:#ffcdd2;
+    color:#ef5350;
 }
-/* Auto-save tip note (Fix #20) */
-.pickr-tip-note-el{
-    display:none;
-    order:4;
-    flex:1 1 100%;
-    width:100%;
-    margin-top:6px;
-    font-size:10px;
-    font-weight:400;
-    color:#9CA3AF;
-    text-align:center;
-    line-height:1.4;
-    pointer-events:none;
-    user-select:none;
-}
+
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/pickr.min.js"></script>
 <script>
@@ -261,10 +253,6 @@
         var existingBtn = interaction.querySelector('.pickr-save-btn-el');
         if (existingBtn) existingBtn.remove();
 
-        // Guard: remove stale tip note on re-init (Fix #20)
-        var existingNote = interaction.querySelector('.pickr-tip-note-el');
-        if (existingNote) existingNote.remove();
-
         // Fix #18: SAVE button repurposed to CANCEL.
         // Always enabled - no dirty/clean state needed anymore since
         // closing the popup normally now auto-saves.
@@ -278,14 +266,6 @@
         };
         interaction.appendChild(cancelBtn);
         cancelBtn.style.display = 'block';
-
-        // Fix #20: Auto-save tip note — injected directly after CANCEL button.
-        // pointer-events:none and user-select:none keep it purely decorative.
-        var tipNote = document.createElement('p');
-        tipNote.className = 'pickr-tip-note-el';
-        tipNote.textContent = 'Changes save automatically when you close this picker.';
-        interaction.appendChild(tipNote);
-        tipNote.style.display = 'block';
       }
     });
 
