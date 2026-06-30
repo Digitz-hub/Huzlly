@@ -1,0 +1,2356 @@
+<script>
+(function () {
+  // ---------------------------------------------------------------------
+  // CONFIG
+  // ---------------------------------------------------------------------
+  var POLL_MS = 300;          // how often we re-scan for new editor instances
+  var HIDE_DELAY_MS = 120;    // small delay before hiding, avoids flicker
+                               // when moving mouse from text to the menu
+
+  // ---------------------------------------------------------------------
+  // STATE
+  // ---------------------------------------------------------------------
+  var boundEditors = new WeakSet(); // editors we've already attached listeners to
+  var activeEditor = null;          // the editor currently showing the menu
+  var hideTimer = null;
+  var isMouseDown = false;          // true while a drag-select is in progress
+
+  document.addEventListener('mousedown', function () {
+    isMouseDown = true;
+  }, true);
+
+  // ProseMirror Tables represents a multi-cell drag-selection as a
+  // CellSelection (not a plain TextSelection). selection.empty is FALSE for
+  // a CellSelection too, so checking `!selection.empty` alone can't tell a
+  // genuine text selection apart from a cell-range selection.
+  //
+  // NOTE: this plugin's Tiptap bundle is minified, so `selection.constructor
+  // .name` is mangled to a single letter (confirmed via console: returns
+  // 't' for the selection object regardless of its actual type) — name-
+  // based detection does NOT work here. Instead we duck-type: only
+  // CellSelection instances expose a `$anchorCell` resolved position
+  // (confirmed via console: present and populated during an actual cell
+  // drag-selection, undefined for plain text selections).
+  function isCellSelection(editor) {
+    var sel = editor.state.selection;
+    return !!(sel && sel.$anchorCell);
+  }
+
+  // ---------------------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // LINK INPUT POPOVER — replaces window.prompt() (line was: var url =
+  // window.prompt('Enter URL', ...)). A native browser dialog can't be
+  // styled, looks jarring next to this otherwise fully custom dark/purple
+  // toolbar, and some embedded/iframe contexts suppress window.prompt
+  // entirely. This is a small floating panel, same visual language as
+  // .huzlly-dropdown, anchored under the Link button.
+  // ---------------------------------------------------------------------
+  var linkPopover = document.createElement('div');
+  linkPopover.id = 'huzlly-link-popover';
+  linkPopover.style.cssText = [
+    'position:fixed',
+    'z-index:10001',
+    'display:none',
+    'background:#1f1f1f',
+    'border-radius:8px',
+    'box-shadow:0 6px 20px rgba(0,0,0,0.35)',
+    'padding:6px',
+    'gap:6px',
+    'flex-direction:row',
+    'align-items:center',
+    'font-family:DM Sans, Helvetica, Arial, sans-serif'
+  ].join(';');
+
+  var linkInput = document.createElement('input');
+  linkInput.type = 'text';
+  linkInput.placeholder = 'https://...';
+  linkInput.style.cssText = [
+    'width:200px',
+    'height:28px',
+    'border:1px solid #444',
+    'border-radius:6px',
+    'background:#2a2a2a',
+    'color:#fff',
+    'font-family:DM Sans, Helvetica, Arial, sans-serif',
+    'font-size:13px',
+    'padding:0 8px',
+    'outline:none'
+  ].join(';');
+  linkInput.addEventListener('focus', function () {
+    linkInput.style.borderColor = '#7F77DD';
+  });
+  linkInput.addEventListener('blur', function () {
+    linkInput.style.borderColor = '#444';
+  });
+
+  function makeLinkPopoverButton(label, bg) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.style.cssText = [
+      'border:none',
+      'background:' + bg,
+      'color:#fff',
+      'height:28px',
+      'padding:0 10px',
+      'border-radius:6px',
+      'cursor:pointer',
+      'font-family:DM Sans, Helvetica, Arial, sans-serif',
+      'font-size:13px',
+      'font-weight:500',
+      'white-space:nowrap'
+    ].join(';');
+    return b;
+  }
+  var linkApplyBtn = makeLinkPopoverButton('Apply', '#534AB7');
+  var linkRemoveBtn = makeLinkPopoverButton('Remove', 'transparent');
+  linkApplyBtn.addEventListener('mouseenter', function () { linkApplyBtn.style.background = '#7F77DD'; });
+  linkApplyBtn.addEventListener('mouseleave', function () { linkApplyBtn.style.background = '#534AB7'; });
+  linkRemoveBtn.addEventListener('mouseenter', function () { linkRemoveBtn.style.background = '#3a3a3a'; });
+  linkRemoveBtn.addEventListener('mouseleave', function () { linkRemoveBtn.style.background = 'transparent'; });
+
+  [linkInput, linkApplyBtn, linkRemoveBtn].forEach(function (el) { linkPopover.appendChild(el); });
+  document.body.appendChild(linkPopover);
+
+  var linkPopoverEditor = null; // which editor the popover is currently editing a link for
+
+  function closeLinkPopover() {
+    linkPopover.style.display = 'none';
+    linkPopoverEditor = null;
+  }
+
+  function applyLinkFromPopover() {
+    if (!linkPopoverEditor) return;
+    var url = linkInput.value.trim();
+    if (url === '') {
+      linkPopoverEditor.chain().focus().extendMarkRange('link').unsetLink().run();
+    } else {
+      linkPopoverEditor.chain().focus().extendMarkRange('link').setLink({ href: url }).run();
+    }
+    closeLinkPopover();
+    updateButtonStates();
+  }
+
+  linkApplyBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    applyLinkFromPopover();
+  });
+  linkRemoveBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!linkPopoverEditor) return;
+    linkPopoverEditor.chain().focus().extendMarkRange('link').unsetLink().run();
+    closeLinkPopover();
+    updateButtonStates();
+  });
+  linkInput.addEventListener('keydown', function (e) {
+    e.stopPropagation(); // don't let the editor or other shortcuts swallow this
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      applyLinkFromPopover();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeLinkPopover();
+    }
+  });
+  // Mousedown on the popover itself (e.g. clicking blank padding) shouldn't
+  // count as an "outside click" and shouldn't steal focus from the input —
+  // same preventDefault pattern used by every other toolbar button here.
+  linkPopover.addEventListener('mousedown', function (e) {
+    if (e.target !== linkInput) e.preventDefault();
+  });
+
+  function openLinkPopoverFor(editor, anchorBtn) {
+    linkPopoverEditor = editor;
+    var existing = editor.getAttributes('link').href;
+    linkInput.value = existing || '';
+    linkPopover.style.display = 'flex';
+
+    var btnRect = anchorBtn.getBoundingClientRect();
+    var popRect = linkPopover.getBoundingClientRect(); // safe even at display:none->flex same tick, measured after display set above
+    var left = btnRect.left;
+    var top = btnRect.bottom + 8;
+
+    var viewportWidth = window.innerWidth;
+    if (left + popRect.width > viewportWidth - 8) left = viewportWidth - popRect.width - 8;
+    if (left < 8) left = 8;
+
+    linkPopover.style.left = left + 'px';
+    linkPopover.style.top = top + 'px';
+
+    // Focus + select existing text so typing a new URL replaces it immediately
+    setTimeout(function () {
+      linkInput.focus();
+      linkInput.select();
+    }, 0);
+  }
+
+  // Closing the link popover on outside click reuses the same document-level
+  // capture-phase click listener as the rest of the toolbars (added below).
+
+  // ---------------------------------------------------------------------
+  // IMAGE INSERT POPOVER
+  // Replaces any file-dialog approach with a styled inline panel —
+  // same visual language as the link popover and the rest of the toolbars.
+  // Supports two paths: paste/type a URL, OR pick a local file.
+  // ---------------------------------------------------------------------
+  var imagePopover = document.createElement('div');
+  imagePopover.id = 'huzlly-image-popover';
+  imagePopover.style.cssText = [
+    'position:fixed',
+    'z-index:10001',
+    'display:none',
+    'background:#1f1f1f',
+    'border-radius:8px',
+    'box-shadow:0 6px 20px rgba(0,0,0,0.35)',
+    'padding:10px',
+    'gap:8px',
+    'flex-direction:column',
+    'font-family:DM Sans, Helvetica, Arial, sans-serif',
+    'width:260px'
+  ].join(';');
+
+  // URL row
+  var imageUrlInput = document.createElement('input');
+  imageUrlInput.type = 'text';
+  imageUrlInput.placeholder = 'Paste image URL…';
+  imageUrlInput.style.cssText = [
+    'width:100%',
+    'height:28px',
+    'border:1px solid #444',
+    'border-radius:6px',
+    'background:#2a2a2a',
+    'color:#fff',
+    'font-family:DM Sans, Helvetica, Arial, sans-serif',
+    'font-size:13px',
+    'padding:0 8px',
+    'outline:none',
+    'box-sizing:border-box'
+  ].join(';');
+  imageUrlInput.addEventListener('focus', function () { imageUrlInput.style.borderColor = '#7F77DD'; });
+  imageUrlInput.addEventListener('blur',  function () { imageUrlInput.style.borderColor = '#444'; });
+
+  // Divider row with "or" label
+  var imageOrRow = document.createElement('div');
+  imageOrRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+  var imageOrLine1 = document.createElement('div');
+  imageOrLine1.style.cssText = 'flex:1;height:1px;background:#333;';
+  var imageOrLabel = document.createElement('span');
+  imageOrLabel.textContent = 'or';
+  imageOrLabel.style.cssText = 'font-size:11px;color:#666;font-family:DM Sans,Helvetica,Arial,sans-serif;white-space:nowrap;';
+  var imageOrLine2 = document.createElement('div');
+  imageOrLine2.style.cssText = 'flex:1;height:1px;background:#333;';
+  [imageOrLine1, imageOrLabel, imageOrLine2].forEach(function (el) { imageOrRow.appendChild(el); });
+
+  // File pick button
+  var imageFileInput = document.createElement('input');
+  imageFileInput.type = 'file';
+  imageFileInput.accept = 'image/*';
+  imageFileInput.style.cssText = 'display:none;';
+  var imageFileBtn = document.createElement('button');
+  imageFileBtn.type = 'button';
+  imageFileBtn.textContent = 'Choose from device';
+  imageFileBtn.style.cssText = [
+    'width:100%',
+    'height:28px',
+    'border:1px solid #444',
+    'border-radius:6px',
+    'background:transparent',
+    'color:#aaa',
+    'font-family:DM Sans, Helvetica, Arial, sans-serif',
+    'font-size:13px',
+    'cursor:pointer',
+    'white-space:nowrap'
+  ].join(';');
+  imageFileBtn.addEventListener('mouseenter', function () { imageFileBtn.style.borderColor = '#7F77DD'; imageFileBtn.style.color = '#fff'; });
+  imageFileBtn.addEventListener('mouseleave', function () { imageFileBtn.style.borderColor = '#444';   imageFileBtn.style.color = '#aaa'; });
+  imageFileBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    imageFileInput.value = '';
+    imageFileInput.click();
+  });
+  imageFileInput.addEventListener('change', function () {
+    var file = imageFileInput.files && imageFileInput.files[0];
+    if (!file || !imagePopoverEditor) return;
+    var reader = new FileReader();
+    reader.onload = function (evt) {
+      var src = evt.target.result;
+      imagePopoverEditor.chain().focus().setImage({ src: src }).run();
+      closeImagePopover();
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // Action buttons row
+  var imageActionRow = document.createElement('div');
+  imageActionRow.style.cssText = 'display:flex;gap:6px;';
+
+  function makeImagePopoverButton(label, bg) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.style.cssText = [
+      'flex:1',
+      'border:none',
+      'background:' + bg,
+      'color:#fff',
+      'height:28px',
+      'border-radius:6px',
+      'cursor:pointer',
+      'font-family:DM Sans, Helvetica, Arial, sans-serif',
+      'font-size:13px',
+      'font-weight:500',
+      'white-space:nowrap'
+    ].join(';');
+    return b;
+  }
+  var imageApplyBtn  = makeImagePopoverButton('Insert', '#534AB7');
+  var imageCancelBtn = makeImagePopoverButton('Cancel', 'transparent');
+  imageApplyBtn.addEventListener('mouseenter',  function () { imageApplyBtn.style.background  = '#7F77DD'; });
+  imageApplyBtn.addEventListener('mouseleave',  function () { imageApplyBtn.style.background  = '#534AB7'; });
+  imageCancelBtn.addEventListener('mouseenter', function () { imageCancelBtn.style.background = '#3a3a3a'; });
+  imageCancelBtn.addEventListener('mouseleave', function () { imageCancelBtn.style.background = 'transparent'; });
+
+  [imageApplyBtn, imageCancelBtn].forEach(function (el) { imageActionRow.appendChild(el); });
+
+  [imageUrlInput, imageOrRow, imageFileBtn, imageFileInput, imageActionRow].forEach(function (el) {
+    imagePopover.appendChild(el);
+  });
+  document.body.appendChild(imagePopover);
+
+  var imagePopoverEditor = null;
+
+  function closeImagePopover() {
+    imagePopover.style.display = 'none';
+    imagePopoverEditor = null;
+  }
+
+  function applyImageFromPopover() {
+    if (!imagePopoverEditor) return;
+    var url = imageUrlInput.value.trim();
+    if (!url) return;
+    imagePopoverEditor.chain().focus().setImage({ src: url }).run();
+    closeImagePopover();
+  }
+
+  imageApplyBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    applyImageFromPopover();
+  });
+  imageCancelBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeImagePopover();
+  });
+  imageUrlInput.addEventListener('keydown', function (e) {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); applyImageFromPopover(); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeImagePopover(); }
+  });
+  imagePopover.addEventListener('mousedown', function (e) {
+    if (e.target !== imageUrlInput) e.preventDefault();
+  });
+
+  function openImagePopoverFor(editor, anchorBtn) {
+    imagePopoverEditor = editor;
+    imageUrlInput.value = '';
+    imagePopover.style.display = 'flex';
+
+    var btnRect = anchorBtn.getBoundingClientRect();
+    var popRect = imagePopover.getBoundingClientRect();
+    var left = btnRect.left;
+    var top  = btnRect.bottom + 8;
+
+    var viewportWidth = window.innerWidth;
+    if (left + popRect.width > viewportWidth - 8) left = viewportWidth - popRect.width - 8;
+    if (left < 8) left = 8;
+
+    imagePopover.style.left = left + 'px';
+    imagePopover.style.top  = top  + 'px';
+
+    setTimeout(function () { imageUrlInput.focus(); }, 0);
+  }
+
+  // BUILD THE MENU DOM (once)
+  // ---------------------------------------------------------------------
+  var menu = document.createElement('div');
+  menu.id = 'huzlly-custom-bubble-menu';
+  menu.style.cssText = [
+    'position:fixed',
+    'top:0',
+    'left:0',
+    'z-index:9999',
+    'display:none',
+    'background:#1f1f1f',
+    'border-radius:8px',
+    'box-shadow:0 4px 14px rgba(0,0,0,0.25)',
+    'padding:4px',
+    'gap:2px',
+    'flex-direction:row',
+    'align-items:center',
+    'font-family:DM Sans, Helvetica, Arial, sans-serif'
+  ].join(';');
+
+  // Phosphor Icons (Bold weight) — raw <path> "d" data, sourced from
+  // @phosphor-icons/core. Rendered as inline SVG so there's no extra font
+  // file to load — fast and light, as requested.
+  var ICONS = {
+    bold: 'M185.08,114.46A48,48,0,0,0,148,36H80A12,12,0,0,0,68,48V200a12,12,0,0,0,12,12h80a52,52,0,0,0,25.08-97.54ZM92,60h56a24,24,0,0,1,0,48H92Zm68,128H92V132h68a28,28,0,0,1,0,56Z',
+    italic: 'M204,56a12,12,0,0,1-12,12H160.65l-40,120H144a12,12,0,0,1,0,24H64a12,12,0,0,1,0-24H95.35l40-120H112a12,12,0,0,1,0-24h80A12,12,0,0,1,204,56Z',
+    underline: 'M204,224a12,12,0,0,1-12,12H64a12,12,0,0,1,0-24H192A12,12,0,0,1,204,224Zm-76-28a68.07,68.07,0,0,0,68-68V56a12,12,0,0,0-24,0v72a44,44,0,0,1-88,0V56a12,12,0,0,0-24,0v72A68.07,68.07,0,0,0,128,196Z',
+    link: 'M117.18,188.74a12,12,0,0,1,0,17l-5.12,5.12A58.26,58.26,0,0,1,70.6,228h0A58.62,58.62,0,0,1,29.14,127.92L63.89,93.17a58.64,58.64,0,0,1,98.56,28.11,12,12,0,1,1-23.37,5.44,34.65,34.65,0,0,0-58.22-16.58L46.11,144.89A34.62,34.62,0,0,0,70.57,204h0a34.41,34.41,0,0,0,24.49-10.14l5.11-5.12A12,12,0,0,1,117.18,188.74ZM226.83,45.17a58.65,58.65,0,0,0-82.93,0l-5.11,5.11a12,12,0,0,0,17,17l5.12-5.12a34.63,34.63,0,1,1,49,49L175.1,145.86A34.39,34.39,0,0,1,150.61,156h0a34.63,34.63,0,0,1-33.69-26.72,12,12,0,0,0-23.38,5.44A58.64,58.64,0,0,0,150.56,180h.05a58.28,58.28,0,0,0,41.47-17.17l34.75-34.75a58.62,58.62,0,0,0,0-82.91Z',
+    listBullets: 'M76,64A12,12,0,0,1,88,52H216a12,12,0,0,1,0,24H88A12,12,0,0,1,76,64Zm140,52H88a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Zm0,64H88a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24ZM44,112a16,16,0,1,0,16,16A16,16,0,0,0,44,112Zm0-64A16,16,0,1,0,60,64,16,16,0,0,0,44,48Zm0,128a16,16,0,1,0,16,16A16,16,0,0,0,44,176Z',
+    listNumbers: 'M228,128a12,12,0,0,1-12,12H116a12,12,0,0,1,0-24H216A12,12,0,0,1,228,128ZM116,76H216a12,12,0,0,0,0-24H116a12,12,0,0,0,0,24ZM216,180H116a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24ZM44,59.31V104a12,12,0,0,0,24,0V40A12,12,0,0,0,50.64,29.27l-16,8a12,12,0,0,0,9.36,22Zm39.73,96.86a27.7,27.7,0,0,0-11.2-18.63A28.89,28.89,0,0,0,32.9,143a27.71,27.71,0,0,0-4.17,7.54,12,12,0,0,0,22.55,8.21,4,4,0,0,1,.58-1,4.78,4.78,0,0,1,6.5-.82,3.82,3.82,0,0,1,1.61,2.6,3.63,3.63,0,0,1-.77,2.77l-.13.17L30.39,200.82A12,12,0,0,0,40,220H72a12,12,0,0,0,0-24H64l14.28-19.11A27.48,27.48,0,0,0,83.73,156.17Z',
+    alignLeft: 'M28,64A12,12,0,0,1,40,52H216a12,12,0,0,1,0,24H40A12,12,0,0,1,28,64Zm12,52H168a12,12,0,0,0,0-24H40a12,12,0,0,0,0,24Zm176,16H40a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Zm-48,40H40a12,12,0,0,0,0,24H168a12,12,0,0,0,0-24Z',
+    alignCenter: 'M28,64A12,12,0,0,1,40,52H216a12,12,0,0,1,0,24H40A12,12,0,0,1,28,64ZM64,92a12,12,0,0,0,0,24H192a12,12,0,0,0,0-24Zm152,40H40a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Zm-24,40H64a12,12,0,0,0,0,24H192a12,12,0,0,0,0-24Z',
+    alignRight: 'M28,64A12,12,0,0,1,40,52H216a12,12,0,0,1,0,24H40A12,12,0,0,1,28,64ZM216,92H88a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Zm0,40H40a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Zm0,40H88a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Z',
+    alignJustify: 'M28,64A12,12,0,0,1,40,52H216a12,12,0,0,1,0,24H40A12,12,0,0,1,28,64ZM216,92H40a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Zm0,40H40a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Zm0,40H40a12,12,0,0,0,0,24H216a12,12,0,0,0,0-24Z',
+    h1: 'M236,112v96a12,12,0,0,1-24,0V134.42L206.66,138a12,12,0,0,1-13.32-20l24-16A12,12,0,0,1,236,112ZM144,44a12,12,0,0,0-12,12v48H52V56a12,12,0,0,0-24,0V176a12,12,0,0,0,24,0V128h80v48a12,12,0,0,0,24,0V56A12,12,0,0,0,144,44Z',
+    h2: 'M156,56V176a12,12,0,0,1-24,0V128H52v48a12,12,0,0,1-24,0V56a12,12,0,0,1,24,0v48h80V56a12,12,0,0,1,24,0Zm84,140H216l28.74-38.33A36,36,0,1,0,182.05,124a12,12,0,0,0,22.63,8,11.67,11.67,0,0,1,1.73-3.22,12,12,0,1,1,19.15,14.46L182.4,200.8A12,12,0,0,0,192,220h48a12,12,0,0,0,0-24Z',
+    h3: 'M252,180a40,40,0,0,1-68.57,28,12,12,0,1,1,17.14-16.79A16,16,0,1,0,212,164a12,12,0,0,1-9.83-18.88L217,124H192a12,12,0,0,1,0-24h48a12,12,0,0,1,9.83,18.88l-18.34,26.2A40,40,0,0,1,252,180ZM144,44a12,12,0,0,0-12,12v48H52V56a12,12,0,0,0-24,0V176a12,12,0,0,0,24,0V128h80v48a12,12,0,0,0,24,0V56A12,12,0,0,0,144,44Z',
+    h4: 'M156,56V176a12,12,0,0,1-24,0V128H52v48a12,12,0,0,1-24,0V56a12,12,0,0,1,24,0v48h80V56a12,12,0,0,1,24,0ZM256,184a12,12,0,0,1-12,12v12a12,12,0,0,1-24,0V196H180a12,12,0,0,1-9.73-19l52-72A12,12,0,0,1,244,112v60A12,12,0,0,1,256,184Zm-36-34.89L203.47,172H220Z',
+    minus: 'M228,128a12,12,0,0,1-12,12H40a12,12,0,0,1,0-24H216A12,12,0,0,1,228,128Z',
+    table: 'M224,44H32A12,12,0,0,0,20,56V192a20,20,0,0,0,20,20H216a20,20,0,0,0,20-20V56A12,12,0,0,0,224,44ZM44,116H76v24H44Zm56,0H212v24H100ZM212,68V92H44V68ZM44,164H76v24H44Zm56,24V164H212v24Z',
+    rowsPlusTop: 'M208,156H48a20,20,0,0,0-20,20v24a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V176A20,20,0,0,0,208,156Zm-4,40H52V180H204Zm4-116H48a20,20,0,0,0-20,20v24a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V100A20,20,0,0,0,208,80Zm-4,40H52V104H204ZM96,36a12,12,0,0,1,12-12h8V16a12,12,0,0,1,24,0v8h8a12,12,0,0,1,0,24h-8v8a12,12,0,0,1-24,0V48h-8A12,12,0,0,1,96,36Z',
+    rowsPlusBottom: 'M208,112H48a20,20,0,0,0-20,20v24a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V132A20,20,0,0,0,208,112Zm-4,40H52V136H204Zm4-116H48A20,20,0,0,0,28,56V80a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V56A20,20,0,0,0,208,36Zm-4,40H52V60H204ZM160,220a12,12,0,0,1-12,12h-8v8a12,12,0,0,1-24,0v-8h-8a12,12,0,0,1,0-24h8v-8a12,12,0,0,1,24,0v8h8A12,12,0,0,1,160,220Z',
+    columnsPlusLeft: 'M124,28H100A20,20,0,0,0,80,48V208a20,20,0,0,0,20,20h24a20,20,0,0,0,20-20V48A20,20,0,0,0,124,28Zm-4,176H104V52h16ZM200,28H176a20,20,0,0,0-20,20V208a20,20,0,0,0,20,20h24a20,20,0,0,0,20-20V48A20,20,0,0,0,200,28Zm-4,176H180V52h16ZM68,128a12,12,0,0,1-12,12H48v8a12,12,0,0,1-24,0v-8H16a12,12,0,0,1,0-24h8v-8a12,12,0,0,1,24,0v8h8A12,12,0,0,1,68,128Z',
+    columnsPlusRight: 'M80,28H56A20,20,0,0,0,36,48V208a20,20,0,0,0,20,20H80a20,20,0,0,0,20-20V48A20,20,0,0,0,80,28ZM76,204H60V52H76ZM156,28H132a20,20,0,0,0-20,20V208a20,20,0,0,0,20,20h24a20,20,0,0,0,20-20V48A20,20,0,0,0,156,28Zm-4,176H136V52h16Zm100-76a12,12,0,0,1-12,12h-8v8a12,12,0,0,1-24,0v-8h-8a12,12,0,0,1,0-24h8v-8a12,12,0,0,1,24,0v8h8A12,12,0,0,1,252,128Z',
+    trashSimple: 'M216,48H40a12,12,0,0,0,0,24h4V208a20,20,0,0,0,20,20H192a20,20,0,0,0,20-20V72h4a12,12,0,0,0,0-24ZM188,204H68V72H188ZM76,20A12,12,0,0,1,88,8h80a12,12,0,0,1,0,24H88A12,12,0,0,1,76,20Z',
+    squaresFour: 'M100,36H56A20,20,0,0,0,36,56v44a20,20,0,0,0,20,20h44a20,20,0,0,0,20-20V56A20,20,0,0,0,100,36ZM96,96H60V60H96ZM200,36H156a20,20,0,0,0-20,20v44a20,20,0,0,0,20,20h44a20,20,0,0,0,20-20V56A20,20,0,0,0,200,36Zm-4,60H160V60h36Zm-96,40H56a20,20,0,0,0-20,20v44a20,20,0,0,0,20,20h44a20,20,0,0,0,20-20V156A20,20,0,0,0,100,136Zm-4,60H60V160H96Zm104-60H156a20,20,0,0,0-20,20v44a20,20,0,0,0,20,20h44a20,20,0,0,0,20-20V156A20,20,0,0,0,200,136Zm-4,60H160V160h36Z',
+    squareSplitHorizontal: 'M200,36H56A20,20,0,0,0,36,56V200a20,20,0,0,0,20,20H200a20,20,0,0,0,20-20V56A20,20,0,0,0,200,36ZM60,60h56V196H60ZM196,196H140V60h56Z',
+    lineVertical: 'M140,24V232a12,12,0,0,1-24,0V24a12,12,0,0,1,24,0Z',
+    frameCorners: 'M140,88a12,12,0,0,1,12-12h32a12,12,0,0,1,12,12v32a12,12,0,0,1-24,0V100H152A12,12,0,0,1,140,88ZM72,180h32a12,12,0,0,0,0-24H84V136a12,12,0,0,0-24,0v32A12,12,0,0,0,72,180ZM236,56V200a20,20,0,0,1-20,20H40a20,20,0,0,1-20-20V56A20,20,0,0,1,40,36H216A20,20,0,0,1,236,56Zm-24,4H44V196H212Z',
+    selectionAll: 'M100,40a12,12,0,0,1,12-12h32a12,12,0,0,1,0,24H112A12,12,0,0,1,100,40Zm44,164H112a12,12,0,0,0,0,24h32a12,12,0,0,0,0-24ZM208,28H184a12,12,0,0,0,0,24h20V72a12,12,0,0,0,24,0V48A20,20,0,0,0,208,28Zm8,72a12,12,0,0,0-12,12v32a12,12,0,0,0,24,0V112A12,12,0,0,0,216,100Zm0,72a12,12,0,0,0-12,12v20H184a12,12,0,0,0,0,24h24a20,20,0,0,0,20-20V184A12,12,0,0,0,216,172ZM40,156a12,12,0,0,0,12-12V112a12,12,0,0,0-24,0v32A12,12,0,0,0,40,156Zm32,48H52V184a12,12,0,0,0-24,0v24a20,20,0,0,0,20,20H72a12,12,0,0,0,0-24ZM40,84A12,12,0,0,0,52,72V52H72a12,12,0,0,0,0-24H48A20,20,0,0,0,28,48V72A12,12,0,0,0,40,84ZM80,68h96a12,12,0,0,1,12,12v96a12,12,0,0,1-12,12H80a12,12,0,0,1-12-12V80A12,12,0,0,1,80,68Zm12,96h72V92H92Z',
+    rows: 'M208,136H48a20,20,0,0,0-20,20v36a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V156A20,20,0,0,0,208,136Zm-4,52H52V160H204Zm4-144H48A20,20,0,0,0,28,64v36a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V64A20,20,0,0,0,208,44Zm-4,52H52V68H204Z',
+    columns: 'M100,28H64A20,20,0,0,0,44,48V208a20,20,0,0,0,20,20h36a20,20,0,0,0,20-20V48A20,20,0,0,0,100,28ZM96,204H68V52H96ZM192,28H156a20,20,0,0,0-20,20V208a20,20,0,0,0,20,20h36a20,20,0,0,0,20-20V48A20,20,0,0,0,192,28Zm-4,176H160V52h28Z',
+    image: 'M220,36H36A20,20,0,0,0,16,56V200a20,20,0,0,0,20,20H220a20,20,0,0,0,20-20V56A20,20,0,0,0,220,36ZM36,60H220v94.34l-38.69-38.69a20,20,0,0,0-28.28,0L116,163l-27.72-27.72a20,20,0,0,0-28.28,0L40,155.06V60Zm184,136H40V184l44-44,28,28a12,12,0,0,0,17,0l58-58,38,38Zm-96-92a20,20,0,1,1,20,20A20,20,0,0,1,124,104Z'
+  };
+
+  function iconSvg(pathData) {
+    return '<svg viewBox="0 0 256 256" width="18" height="18" fill="currentColor" style="display:block;pointer-events:none;"><path d="' +
+      pathData + '"/></svg>';
+  }
+
+  function makeButton(iconKey, title, onClick) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.title = title;
+    btn.innerHTML = iconSvg(ICONS[iconKey]);
+    btn.style.cssText = [
+      'border:none',
+      'background:transparent',
+      'color:#fff',
+      'width:32px',
+      'height:32px',
+      'border-radius:6px',
+      'cursor:pointer',
+      'display:flex',
+      'align-items:center',
+      'justify-content:center',
+      'padding:0'
+    ].join(';');
+    btn.dataset.active = 'false';
+    btn.addEventListener('mouseenter', function () {
+      // Use a lighter highlight if already active, so hover still gives
+      // feedback without erasing the "this is currently applied" color.
+      btn.style.background = btn.dataset.active === 'true' ? '#948CE0' : '#534AB7';
+    });
+    btn.addEventListener('mouseleave', function () {
+      // Restore based on actual active state, not a hardcoded transparent —
+      // otherwise hovering off an active (e.g. Bold-is-on) button would
+      // incorrectly clear its "active" highlight even though the mark is
+      // still applied to the selected text.
+      btn.style.background = btn.dataset.active === 'true' ? '#7F77DD' : 'transparent';
+    });
+    // mousedown (not click) so we fire before the editor's blur/selection
+    // collapses, and we preventDefault so the editor never loses focus.
+    btn.addEventListener('mousedown', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!activeEditor) return;
+      onClick(activeEditor);
+      updateButtonStates();
+    });
+    return btn;
+  }
+
+  var boldBtn = makeButton('bold', 'Bold', function (ed) {
+    ed.chain().focus().toggleBold().run();
+  });
+
+  var italicBtn = makeButton('italic', 'Italic', function (ed) {
+    ed.chain().focus().toggleItalic().run();
+  });
+
+  var underlineBtn = makeButton('underline', 'Underline', function (ed) {
+    ed.chain().focus().toggleUnderline().run();
+  });
+
+  var linkBtn = makeButton('link', 'Link', function (ed) {
+    if (linkPopoverEditor === ed && linkPopover.style.display === 'flex') {
+      closeLinkPopover();
+    } else {
+      openLinkPopoverFor(ed, linkBtn);
+    }
+  });
+
+  var h1Btn = makeButton('h1', 'Heading 1', function (ed) {
+    ed.chain().focus().toggleHeading({ level: 1 }).run();
+  });
+  var h2Btn = makeButton('h2', 'Heading 2', function (ed) {
+    ed.chain().focus().toggleHeading({ level: 2 }).run();
+  });
+  var h3Btn = makeButton('h3', 'Heading 3', function (ed) {
+    ed.chain().focus().toggleHeading({ level: 3 }).run();
+  });
+  var h4Btn = makeButton('h4', 'Heading 4', function (ed) {
+    ed.chain().focus().toggleHeading({ level: 4 }).run();
+  });
+
+  var bulletListBtn = makeButton('listBullets', 'Bullet List', function (ed) {
+    ed.chain().focus().toggleBulletList().run();
+  });
+  var orderedListBtn = makeButton('listNumbers', 'Numbered List', function (ed) {
+    ed.chain().focus().toggleOrderedList().run();
+  });
+
+  var alignLeftBtn = makeButton('alignLeft', 'Align Left', function (ed) {
+    ed.chain().focus().setTextAlign('left').run();
+  });
+  var alignCenterBtn = makeButton('alignCenter', 'Align Center', function (ed) {
+    ed.chain().focus().setTextAlign('center').run();
+  });
+  var alignRightBtn = makeButton('alignRight', 'Align Right', function (ed) {
+    ed.chain().focus().setTextAlign('right').run();
+  });
+  var alignJustifyBtn = makeButton('alignJustify', 'Justify', function (ed) {
+    ed.chain().focus().setTextAlign('justify').run();
+  });
+
+  var hrBtn = makeButton('minus', 'Horizontal Rule', function (ed) {
+    ed.chain().focus().setHorizontalRule().run();
+  });
+
+  var tableBtn = makeButton('table', 'Insert Table', function (ed) {
+    ed.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+  });
+
+  var imageBtn = makeButton('image', 'Insert Image', function (ed) {
+    if (imagePopoverEditor === ed && imagePopover.style.display === 'flex') {
+      closeImagePopover();
+    } else {
+      openImagePopoverFor(ed, imageBtn);
+    }
+  });
+
+  function makeSeparator() {
+    var sep = document.createElement('div');
+    sep.style.cssText = 'width:1px;height:20px;background:#444;margin:0 2px;';
+    return sep;
+  }
+
+  [
+    h1Btn, h2Btn, h3Btn, h4Btn,
+    makeSeparator(),
+    boldBtn, italicBtn, underlineBtn,
+    makeSeparator(),
+    bulletListBtn, orderedListBtn,
+    makeSeparator(),
+    alignLeftBtn, alignCenterBtn, alignRightBtn, alignJustifyBtn,
+    makeSeparator(),
+    linkBtn, hrBtn, tableBtn, imageBtn
+  ].forEach(function (el) {
+    menu.appendChild(el);
+  });
+
+  // Bubble runs this script late in the page lifecycle, so document.body
+  // is always present by the time this IIFE executes. A single appendChild
+  // is enough — the DOMContentLoaded listener was redundant and caused a
+  // second (move) operation on an already-attached node.
+  document.body.appendChild(menu);
+
+  function updateButtonStates() {
+    if (!activeEditor) return;
+    setActive(boldBtn, activeEditor.isActive('bold'));
+    setActive(italicBtn, activeEditor.isActive('italic'));
+    setActive(underlineBtn, activeEditor.isActive('underline'));
+    setActive(linkBtn, activeEditor.isActive('link'));
+    setActive(h1Btn, activeEditor.isActive('heading', { level: 1 }));
+    setActive(h2Btn, activeEditor.isActive('heading', { level: 2 }));
+    setActive(h3Btn, activeEditor.isActive('heading', { level: 3 }));
+    setActive(h4Btn, activeEditor.isActive('heading', { level: 4 }));
+    setActive(bulletListBtn, activeEditor.isActive('bulletList'));
+    setActive(orderedListBtn, activeEditor.isActive('orderedList'));
+    setActive(alignLeftBtn, activeEditor.isActive({ textAlign: 'left' }));
+    setActive(alignCenterBtn, activeEditor.isActive({ textAlign: 'center' }));
+    setActive(alignRightBtn, activeEditor.isActive({ textAlign: 'right' }));
+    setActive(alignJustifyBtn, activeEditor.isActive({ textAlign: 'justify' }));
+  }
+
+  function setActive(btn, isActive) {
+    btn.dataset.active = isActive ? 'true' : 'false';
+    btn.style.background = isActive ? '#7F77DD' : 'transparent';
+  }
+
+  // ---------------------------------------------------------------------
+  // POSITIONING
+  // ---------------------------------------------------------------------
+  function positionMenuForEditor(editor) {
+    try {
+      var selection = editor.state.selection;
+      var from = selection.from;
+      var to = selection.to;
+      var startCoords = editor.view.coordsAtPos(from);
+      var endCoords = editor.view.coordsAtPos(to);
+
+      var top = Math.min(startCoords.top, endCoords.top);
+      var left = (startCoords.left + endCoords.left) / 2;
+
+      // Measure menu after it's visible (display:flex) so width is accurate
+      menu.style.display = 'flex';
+      var menuRect = menu.getBoundingClientRect();
+
+      var finalLeft = left - menuRect.width / 2;
+      var finalTop = top - menuRect.height - 8; // 8px gap above selection
+
+      // Keep menu within viewport horizontally
+      var viewportWidth = window.innerWidth;
+      if (finalLeft < 8) finalLeft = 8;
+      if (finalLeft + menuRect.width > viewportWidth - 8) {
+        finalLeft = viewportWidth - menuRect.width - 8;
+      }
+
+      // If there isn't room above, flip below the selection
+      if (finalTop < 8) {
+        finalTop = Math.max(startCoords.bottom, endCoords.bottom) + 8;
+      }
+
+      menu.style.top = finalTop + 'px';
+      menu.style.left = finalLeft + 'px';
+    } catch (err) {
+      // selection/coords can briefly be invalid during fast typing; ignore
+      console.warn('[Huzlly Bubble Menu] positioning error', err);
+    }
+  }
+
+  // Position the menu at raw viewport coordinates (e.g. right-click mouse pos).
+  // Used instead of positionMenuForEditor when there's no meaningful selection
+  // to derive coords from — the menu appears just above the click point.
+  function positionMenuAtCoords(clientX, clientY) {
+    try {
+      menu.style.display = 'flex';
+      var menuRect = menu.getBoundingClientRect();
+      var viewportWidth  = window.innerWidth;
+      var viewportHeight = window.innerHeight;
+
+      var finalLeft = clientX - menuRect.width / 2;
+      var finalTop  = clientY - menuRect.height - 8; // 8px gap above click
+
+      // Clamp horizontally
+      if (finalLeft < 8) finalLeft = 8;
+      if (finalLeft + menuRect.width > viewportWidth - 8) {
+        finalLeft = viewportWidth - menuRect.width - 8;
+      }
+
+      // If no room above, flip below click point
+      if (finalTop < 8) finalTop = clientY + 8;
+
+      // Final vertical clamp (shouldn't normally be needed)
+      if (finalTop + menuRect.height > viewportHeight - 8) {
+        finalTop = viewportHeight - menuRect.height - 8;
+      }
+
+      menu.style.top  = finalTop  + 'px';
+      menu.style.left = finalLeft + 'px';
+    } catch (err) {
+      console.warn('[Huzlly Bubble Menu] positionMenuAtCoords error', err);
+    }
+  }
+
+  function showMenuFor(editor) {
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+    activeEditor = editor;
+    updateButtonStates();
+    positionMenuForEditor(editor);
+  }
+
+  // Show the bubble menu triggered by a right-click at (clientX, clientY).
+  // Positions at the mouse cursor instead of the text-selection midpoint —
+  // since right-click doesn't necessarily imply a non-empty selection.
+  function showMenuForAtCoords(editor, clientX, clientY) {
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+    activeEditor = editor;
+    updateButtonStates();
+    positionMenuAtCoords(clientX, clientY);
+  }
+
+  function scheduleHide(editor) {
+    // Only hide if the editor asking to hide is the one currently showing
+    if (activeEditor !== editor) return;
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = setTimeout(function () {
+      menu.style.display = 'none';
+      activeEditor = null;
+    }, HIDE_DELAY_MS);
+  }
+
+  // Don't let the hide-on-blur timer fire if the mouse moved INTO the menu
+  menu.addEventListener('mouseenter', function () {
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+  });
+  menu.addEventListener('mouseleave', function () {
+    if (!activeEditor) return;
+    // Only hide if the selection is actually empty (or editor lost focus).
+    // If text is still selected, leave the menu open — moving the mouse
+    // away from it should not dismiss it.
+    var sel = activeEditor.state.selection;
+    if (sel.empty || !activeEditor.isFocused) {
+      scheduleHide(activeEditor);
+    }
+  });
+
+  // Reliable fallback: toolbar button interactions use
+  // mousedown+preventDefault to keep the editor focused, which can leave
+  // the editor's own blur tracking in a state where 'blur' doesn't fire
+  // cleanly on the *next* outside click. This global listener is a safety
+  // net — if a click lands outside both the menu and the active editor's
+  // DOM, force-hide regardless of what the editor's own events report.
+  document.addEventListener('click', function (e) {
+    // --- Bubble Menu ---
+    if (activeEditor) {
+      if (!menu.contains(e.target)) {
+        var editorDom = activeEditor.view && activeEditor.view.dom;
+        if (!editorDom || !editorDom.contains(e.target)) {
+          var sel = activeEditor.state.selection;
+          if (sel.empty || !activeEditor.isFocused) {
+            menu.style.display = 'none';
+            if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+            activeEditor = null;
+          }
+        }
+      }
+    }
+
+    // --- Link Popover ---
+    // Closes on any click outside the popover itself and outside the Link
+    // button (clicking Link again is handled by linkBtn's own toggle logic,
+    // not here — this is just the "clicked away" case).
+    if (linkPopoverEditor && linkPopover.style.display === 'flex') {
+      if (!linkPopover.contains(e.target) && e.target !== linkBtn && !linkBtn.contains(e.target)) {
+        closeLinkPopover();
+      }
+    }
+
+    // --- Image Popover ---
+    if (imagePopoverEditor && imagePopover.style.display === 'flex') {
+      if (!imagePopover.contains(e.target) &&
+          e.target !== imageBtn && !imageBtn.contains(e.target) &&
+          e.target !== fImageBtn && !fImageBtn.contains(e.target)) {
+        closeImagePopover();
+      }
+    }
+
+    // --- Table Toolbar ---
+    // Hide if the click landed outside both the toolbar and EVERY editor on the
+    // page (not just the currently-active one). Checking only the previously-
+    // active editor's DOM meant clicking into a *different* editor instance
+    // (e.g. another row's table in a Repeating Group) was wrongly treated as
+    // "outside" and force-hid the toolbar/dropdown immediately — even though
+    // that click is about to trigger its own selectionUpdate/checkTableContext,
+    // which already knows how to show/hide/reposition correctly. Letting that
+    // logic own the decision (instead of double-deciding here) removes the
+    // forced hide+flicker the user sees when moving between cells/tables.
+    if (tableActiveEditor) {
+      var clickInsideAnyEditor = false;
+      var allEditorDoms = document.querySelectorAll('.ProseMirror');
+      for (var pmIdx = 0; pmIdx < allEditorDoms.length; pmIdx++) {
+        if (allEditorDoms[pmIdx].contains(e.target)) { clickInsideAnyEditor = true; break; }
+      }
+      if (!tableToolbar.contains(e.target) && !clickInsideAnyEditor) {
+        closeActiveDropdown();
+        tableToolbar.style.display = 'none';
+        if (tableHideTimer) { clearTimeout(tableHideTimer); tableHideTimer = null; }
+        tableActiveEditor = null;
+      } else if (tableToolbar.contains(e.target)) {
+        // Click was inside the toolbar but not on a dropdown item — close any
+        // open dropdown (e.g. clicking a different group trigger closes the old one).
+        // The individual trigger handlers already call closeActiveDropdown before
+        // opening their own panel, so this is just a safety net for toolbar whitespace.
+      }
+      // else: click landed inside SOME editor (same one or a different instance).
+      // This is a real "user clicked a different cell" signal — close any open
+      // dropdown right away (its options no longer apply to whatever the user
+      // just clicked). The toolbar itself stays visible and will reposition via
+      // that editor's own selectionUpdate -> checkTableContext, which decides
+      // whether to keep, move, or hide it for the new context.
+      else if (clickInsideAnyEditor && activeDropdown) {
+        closeActiveDropdown();
+      }
+    }
+
+    // --- Floating Menu ---
+    if (floatingActiveEditor) {
+      if (!floatingMenu.contains(e.target) && !plusBtn.contains(e.target)) {
+        var floatingEditorDom = floatingActiveEditor.view && floatingActiveEditor.view.dom;
+        if (!floatingEditorDom || !floatingEditorDom.contains(e.target)) {
+          hideFloatingSystem();
+        }
+      }
+    }
+  }, true);
+
+  // Safety net for drag-select overshoot: if the user starts dragging
+  // inside an editor and releases the mouse outside its DOM (or outside
+  // the browser viewport edge), ProseMirror's own selectionUpdate can be
+  // delayed or missed. On every mouseup, re-check all bound editors for a
+  // non-empty selection and show the menu for whichever one has one.
+  // This also doubles as the "show menu now that drag is complete" trigger
+  // for normal in-editor selections (see isMouseDown gating below).
+  //
+  // NOTE on isFocused: sections 5.5/7.5 of the reference .md document that
+  // Bubble unreliably reports `editor.isFocused === false` at exactly the
+  // moments that matter, which is why checkTableContext() and
+  // checkFloatingMenuContext() don't gate on it at all. This handler can't
+  // simply drop the check the same way, though — unlike those two, which
+  // only ever run for the one editor that just fired its OWN
+  // selectionUpdate, this handler loops over EVERY editor on the page, so
+  // isFocused (or some proxy for it) is the only signal telling it which
+  // instance the user actually just interacted with. Dropping it outright
+  // risked showing the menu for a stale non-empty selection left over in a
+  // totally different, unfocused row.
+  // Fix: corroborate with document.activeElement (whether the click
+  // landed inside that editor's own contenteditable DOM) as a second,
+  // independent signal alongside isFocused — either one being true is
+  // enough, since the two are unreliable in different ways but unlikely to
+  // both be wrong for the same editor at the same moment.
+  document.addEventListener('mouseup', function () {
+    isMouseDown = false;
+    setTimeout(function () {
+      var nodes = document.querySelectorAll('.ProseMirror');
+      for (var i = 0; i < nodes.length; i++) {
+        var ed = nodes[i].editor;
+        if (!ed) continue;
+        var domLooksFocused = document.activeElement === nodes[i] || nodes[i].contains(document.activeElement);
+        if ((ed.isFocused || domLooksFocused) && !ed.state.selection.empty) {
+          // A CellSelection (multi-cell drag) is also "non-empty", but it's
+          // a structural table selection, not text — the Bubble Menu
+          // (Bold/Italic/etc.) doesn't apply to it. Let checkTableContext
+          // handle this case instead (Merge Cells etc. in the Table
+          // Toolbar), and skip showing the text-formatting menu here.
+          if (isCellSelection(ed)) {
+            checkTableContext(ed);
+            return;
+          }
+          showMenuFor(ed);
+          // Priority rule: a non-empty text selection always wins over the
+          // Table Toolbar, even if the selection is inside a table cell.
+          // Force-clear any lingering table toolbar immediately rather
+          // than waiting on its own hide-debounce, so the two floating
+          // toolbars never appear stacked on top of each other.
+          if (tableHideTimer) {
+            clearTimeout(tableHideTimer);
+            tableHideTimer = null;
+          }
+          tableToolbar.style.display = 'none';
+          tableActiveEditor = null;
+          return;
+        }
+      }
+    }, 0);
+  });
+
+  // ---------------------------------------------------------------------
+  // BINDING TO EDITOR INSTANCES
+  // ---------------------------------------------------------------------
+  // ---------------------------------------------------------------------
+  // GOOGLE-DOCS-STYLE FIXED-WIDTH COLUMN RESIZING — PERCENTAGE / PORTABLE
+  //
+  // ORIGINAL PROBLEM (section 12 of the reference .md): Tiptap's Table
+  // extension wraps prosemirror-tables' `columnResizing` plugin. On drag,
+  // that plugin's internal `updateColumnWidth()` sets a new `colwidth`
+  // attr (PIXELS) on ONLY the dragged column, on every row, via
+  // `view.dispatch(tr)`. It never touches neighboring columns and has no
+  // concept of "total table width" — so with `table-layout:fixed` +
+  // explicit pixel `<col>` widths, the table's rendered width becomes
+  // sum(colwidths), which grows/shrinks freely and can exceed the editor
+  // container, causing a horizontal scrollbar.
+  //
+  // WHY THIS GOT REWRITTEN FROM THE ORIGINAL PIXEL VERSION: even after
+  // fixing overflow-inside-Bubble by keeping sum(colwidths) constant in
+  // PIXELS, those pixels are meaningless once the saved HTML is rendered
+  // as PLAIN HTML on a different website at a different container width.
+  // A column resized to 267px inside an 800px-wide Bubble editor is still
+  // "267px" — and too narrow/too wide/overflowing — inside a 200px-wide
+  // or 1600px-wide container elsewhere. Percentages are the only unit
+  // that's correct in any container, so cell width is now persisted as
+  // `style="width:NN.NN%"` instead of as a `colwidth` pixel attr. See
+  // section 13 of the reference .md for the full write-up.
+  //
+  // FIX: we cannot configure this away (no such option exists on
+  // Table/TableCell), and we can't `.extend()` the bundled Table extension
+  // since this Tiptap build is minified/black-boxed (see section 2 of the
+  // reference .md). Instead we use `editor.registerPlugin()` to attach an
+  // `appendTransaction` plugin per editor instance that:
+  //   1. Lets the stock columnResizing plugin's drag/cursor/handle UI run
+  //      completely untouched — it still writes a `colwidth` (px) attr on
+  //      the dragged column every mousemove tick; we just intercept the
+  //      resulting transaction and never let that px value reach the
+  //      saved doc.
+  //   2. Converts that column's requested px width into a % of the
+  //      table's current rendered width, then looks up the table's
+  //      EXISTING proportions from each cell's own `style="width:%"` —
+  //      our persisted source of truth — seeding from actual rendered
+  //      pixel widths the first time a table is touched (no style widths
+  //      yet either).
+  //   3. Redistributes the dragged column's delta proportionally across
+  //      every OTHER column, clamped at MIN_COL_PCT, so the percentages
+  //      always sum to exactly 100 — the table's rendered total width can
+  //      never exceed its container, in Bubble or anywhere else.
+  //   4. Dispatches a follow-up transaction in the same tick that writes
+  //      the corrected `style="width:%"` onto every cell AND nulls out
+  //      `colwidth`, so ProseMirror's stock `<col style="width:Npx">`
+  //      never renders — it would silently win over the cell's own %
+  //      width under `table-layout:fixed`, and is exactly the absolute
+  //      pixel value that breaks on a different site.
+  // ---------------------------------------------------------------------
+  (function () {
+    var MIN_COL_PCT = 5; // floor per column, as a % of table width (replaces the old 40px floor)
+
+    // Lightweight TableMap: row/col -> { cell, cellIndex, rowIndex, startCol,
+    // colspan }. Standalone equivalent of prosemirror-tables' TableMap,
+    // written from scratch since we can't import internals from this
+    // minified bundle. (Unchanged from the pixel version.)
+    function buildColumnMap(table) {
+      var width = 0;
+      var rows = [];
+      table.forEach(function (row) { rows.push(row); });
+
+      rows.forEach(function (row) {
+        var w = 0;
+        row.forEach(function (cell) { w += cell.attrs.colspan || 1; });
+        if (w > width) width = w;
+      });
+
+      var map = rows.map(function () { return new Array(width).fill(null); });
+      var rowspanCarry = [];
+
+      rows.forEach(function (row, rowIndex) {
+        var col = 0;
+        var cellIndex = 0;
+        var cells = [];
+        row.forEach(function (cell) { cells.push(cell); });
+
+        while (col < width) {
+          var carried = rowspanCarry.find(function (c) { return c.col === col && c.remaining > 0; });
+          if (carried) {
+            map[rowIndex][col] = carried.entry;
+            carried.remaining--;
+            col++;
+            continue;
+          }
+          var cell = cells[cellIndex];
+          if (!cell) break;
+          var colspan = cell.attrs.colspan || 1;
+          var rowspan = cell.attrs.rowspan || 1;
+          var entry = { cell: cell, cellIndex: cellIndex, rowIndex: rowIndex, startCol: col, colspan: colspan };
+          for (var c = 0; c < colspan; c++) map[rowIndex][col + c] = entry;
+          if (rowspan > 1) rowspanCarry.push({ col: col, entry: entry, remaining: rowspan - 1 });
+          col += colspan;
+          cellIndex++;
+        }
+      });
+
+      return { width: width, height: rows.length, rows: rows, map: map };
+    }
+
+    function findEnclosingTable(state, pos) {
+      var $pos = state.doc.resolve(pos);
+      for (var d = $pos.depth; d > 0; d--) {
+        if ($pos.node(d).type.name === 'table') {
+          return { table: $pos.node(d), tableStart: $pos.before(d) };
+        }
+      }
+      return null;
+    }
+
+    // Reads the raw `colwidth` (PIXEL) attr the STOCK columnResizing
+    // plugin just wrote for whichever column is being dragged right now.
+    // We never persist colwidth ourselves (applyColumnPcts below always
+    // nulls it back out), so on every tick this is empty except for the
+    // one column actively being dragged — that IS the "what changed"
+    // signal, with zero before/after diffing needed.
+    function getDraggedColumnPx(table) {
+      var map = buildColumnMap(table);
+      for (var col = 0; col < map.width; col++) {
+        var entry = map.map[0] ? map.map[0][col] : null;
+        if (!entry) continue;
+        var idx = col - entry.startCol;
+        var cw = entry.cell.attrs.colwidth ? entry.cell.attrs.colwidth[idx] : null;
+        if (cw) return { col: col, px: cw, mapWidth: map.width };
+      }
+      return null;
+    }
+
+    // Pulls the `width:NN.NN%` portion out of a cell's inline `style`
+    // attribute. The `style` attribute itself is kept alive across the
+    // save/load round-trip by the `preserveAttributes` extension (see
+    // section 2.2 of the reference .md) — this just parses our one
+    // property back out of whatever else might share that string (e.g.
+    // `vertical-align` from the built-in cell-alignment feature).
+    function readStylePct(styleStr) {
+      if (!styleStr) return null;
+      var m = /width\s*:\s*([\d.]+)\s*%/i.exec(styleStr);
+      return m ? parseFloat(m[1]) : null;
+    }
+
+    // Reads existing per-column percentages straight from each cell's own
+    // `style="width:%"` — this is OUR persisted memory now, replacing the
+    // old colwidth-array-as-memory approach, precisely so the doc never
+    // has to carry colwidth (px) as state between drags.
+    function getExistingColumnPcts(table) {
+      var map = buildColumnMap(table);
+      var pcts = new Array(map.width).fill(null);
+      var hasAny = false;
+      for (var col = 0; col < map.width; col++) {
+        var entry = map.map[0] ? map.map[0][col] : null;
+        if (!entry) continue;
+        var whole = readStylePct(entry.cell.attrs.style);
+        if (whole == null) continue;
+        // A spanned cell's style% covers its whole span; split evenly across
+        // the underlying columns for this internal map — same level of
+        // approximation the old colwidth-array version used for spans.
+        pcts[col] = whole / entry.colspan;
+        hasAny = true;
+      }
+      return { pcts: pcts, hasAny: hasAny, map: map };
+    }
+
+    // Converts any array of positive relative weights into percentages
+    // that sum to exactly 100, with every entry floored at MIN_COL_PCT.
+    // Used both for seeding (raw px weights in) and as a final safety
+    // pass on whatever redistribute() produces, since floor-clamping or
+    // float rounding could otherwise drift the sum away from 100 by a
+    // fraction of a percent over many drags — and that drift is exactly
+    // what would let the table overflow its container.
+    function normalizeToPct(weights) {
+      var n = weights.length;
+      var total = weights.reduce(function (s, w) { return s + w; }, 0) || 1;
+      var pct = weights.map(function (w) { return Math.max(MIN_COL_PCT, (w / total) * 100); });
+
+      var over = pct.reduce(function (s, p) { return s + p; }, 0) - 100;
+      if (Math.abs(over) > 0.001) {
+        var aboveFloorIdx = [];
+        for (var i = 0; i < n; i++) if (pct[i] > MIN_COL_PCT + 0.001) aboveFloorIdx.push(i);
+        var aboveFloorTotal = aboveFloorIdx.reduce(function (s, i) { return s + (pct[i] - MIN_COL_PCT); }, 0);
+        if (aboveFloorTotal > 0) {
+          aboveFloorIdx.forEach(function (i) {
+            var share = (pct[i] - MIN_COL_PCT) / aboveFloorTotal;
+            pct[i] -= over * share;
+          });
+        }
+      }
+
+      var sumSoFar = 0;
+      for (var j = 0; j < n - 1; j++) {
+        pct[j] = Math.round(pct[j] * 100) / 100;
+        sumSoFar += pct[j];
+      }
+      pct[n - 1] = Math.round((100 - sumSoFar) * 100) / 100; // last column absorbs all rounding drift
+      return pct;
+    }
+
+    // Read current rendered pixel widths straight off the DOM, then
+    // normalise to percentages summing to exactly 100. Used only the
+    // first time a given table is touched, before any style widths
+    // exist, so the seeded baseline reflects whatever proportions are
+    // actually on-screen right now (typically an equal split, from the
+    // default table-layout:fixed behaviour on a freshly-inserted table).
+    function seedColumnPcts(editor, tableStart, mapWidth) {
+      var dom = editor.view.nodeDOM(tableStart);
+      while (dom && dom.tagName !== 'TABLE') dom = dom.parentElement;
+      var px = [];
+      if (dom) {
+        var firstRowEl = dom.querySelector('tr');
+        var cellEls = firstRowEl ? Array.prototype.slice.call(firstRowEl.children) : [];
+        var col = 0;
+        cellEls.forEach(function (el) {
+          var span = el.colSpan || 1;
+          var perCol = el.getBoundingClientRect().width / span;
+          for (var i = 0; i < span; i++) px[col + i] = perCol;
+          col += span;
+        });
+      }
+      for (var i = 0; i < mapWidth; i++) {
+        if (!px[i] || isNaN(px[i])) px[i] = 1; // equal fallback weight, never 0 (avoids divide-by-zero)
+      }
+      return normalizeToPct(px);
+    }
+
+    // Core math: given the table's current per-column percentages, the
+    // column that changed, and its requested new percentage, return a
+    // corrected array where the total stays at exactly 100 — delta is
+    // absorbed proportionally by every OTHER column, clamped at
+    // MIN_COL_PCT (mirrors Google Docs: dragging stops absorbing once
+    // neighbors hit their floor). Same algorithm as the original pixel
+    // version (section 12), just in % units with a % floor.
+    function redistribute(pcts, changedCol, requestedNewPct) {
+      var n = pcts.length;
+      var oldVal = pcts[changedCol];
+      var requestedDelta = requestedNewPct - oldVal;
+
+      var others = [];
+      for (var i = 0; i < n; i++) if (i !== changedCol) others.push(i);
+      var othersTotal = others.reduce(function (s, i) { return s + pcts[i]; }, 0);
+
+      var delta = requestedDelta;
+      if (delta > 0) {
+        var maxAbsorbable = Math.max(othersTotal - others.length * MIN_COL_PCT, 0);
+        delta = Math.min(delta, maxAbsorbable);
+      } else if (delta < 0) {
+        var minShrink = MIN_COL_PCT - oldVal;
+        delta = Math.max(delta, minShrink);
+      }
+
+      var result = pcts.slice();
+      result[changedCol] = oldVal + delta;
+
+      if (delta !== 0 && othersTotal > 0) {
+        var remaining = -delta;
+        var distributed = 0;
+        others.forEach(function (i, idx) {
+          var share = pcts[i] / othersTotal;
+          var amount = (idx === others.length - 1) ? (remaining - distributed) : (remaining * share);
+          var newP = pcts[i] + amount;
+          if (newP < MIN_COL_PCT) newP = MIN_COL_PCT;
+          result[i] = newP;
+          distributed += amount;
+        });
+      }
+      // Safety pass: guarantees an exact 100 sum regardless of any
+      // floor-clamping above (mirrors normalizeToPct's drift fix).
+      return normalizeToPct(result);
+    }
+
+    // Merges a new `width:NN.NN%` into a cell's existing inline `style`
+    // string, preserving any other style property already present (e.g.
+    // `vertical-align`, which Tiptap's built-in cell-alignment feature
+    // renders into the same merged `style` attribute) instead of
+    // clobbering the whole thing.
+    function withStyleWidth(styleStr, pct) {
+      var props = (styleStr || '').split(';')
+        .map(function (p) { return p.trim(); })
+        .filter(function (p) { return p && !/^width\s*:/i.test(p); });
+      props.push('width:' + pct.toFixed(2) + '%');
+      return props.join('; ');
+    }
+
+    // Write a corrected percentage array back onto every row of the table
+    // inside the given transaction (using the transaction's own evolving
+    // doc, so positions stay valid across multiple setNodeMarkup calls).
+    // `colwidth` is always nulled here — see the big comment above this
+    // IIFE for why — so the only width signal that ever reaches
+    // `editor.getHTML()` is each cell's own `style="width:%"`.
+    function applyColumnPcts(tr, tableStart, table, pcts) {
+      var map = buildColumnMap(table);
+
+      for (var col = 0; col < map.width; col++) {
+        for (var r = 0; r < map.height; r++) {
+          var entry = map.map[r][col];
+          if (!entry || entry.startCol !== col) continue;
+
+          var row = table.child(r);
+          var rowStart = tableStart + 1;
+          for (var rr = 0; rr < r; rr++) rowStart += table.child(rr).nodeSize;
+
+          var offsetInRow = 0, ci = 0, cellPos = null;
+          row.forEach(function (c2) {
+            if (ci === entry.cellIndex) cellPos = rowStart + offsetInRow;
+            offsetInRow += c2.nodeSize;
+            ci++;
+          });
+          if (cellPos == null) continue;
+
+          var mapped = tr.mapping.map(cellPos);
+          var node = tr.doc.nodeAt(mapped);
+          if (!node) continue;
+
+          var colspan = entry.colspan;
+          var cellPct = 0;
+          for (var c = 0; c < colspan; c++) cellPct += pcts[col + c] || 0;
+
+          var newAttrs = Object.assign({}, node.attrs, {
+            colwidth: null,
+            style: withStyleWidth(node.attrs.style, cellPct)
+          });
+          tr.setNodeMarkup(mapped, null, newAttrs);
+        }
+      }
+    }
+
+    // NOTE: we deliberately do NOT inspect step.toJSON().stepType here.
+    // In this minified bundle, step class names/shapes can't be relied on
+    // (confirmed elsewhere in this file — see section 2.3 of the reference
+    // .md re: mangled constructor names). Attr-only changes (which is all
+    // the stock columnResizing plugin ever produces) NEVER change the
+    // document's content size — only typing/insert/delete/paste do. So we
+    // use size-equality as a bundle-agnostic proxy for "this was an
+    // attribute-only transaction", then confirm it's actually a colwidth
+    // change inside the per-table loop below (harmless no-op otherwise).
+    function isAttrOnlyTransaction(tr) {
+      if (!tr.docChanged) return false;
+      return tr.before.content.size === tr.doc.content.size;
+    }
+
+    // NOTE: we deliberately do NOT try to locate the real ProseMirror
+    // `Plugin` class via constructor-name sniffing. This bundle is minified
+    // (constructor names get mangled — confirmed elsewhere in this file,
+    // see the isCellSelection() comment in section 1 of the reference .md),
+    // so `constructor.name === 'Plugin'` is unreliable and was the actual
+    // cause of this plugin silently failing to install. ProseMirror's
+    // EditorState only ever reads `plugin.spec.appendTransaction`,
+    // `plugin.props`, and `plugin.key` off a plugin object — it does not
+    // `instanceof`-check. So we hand it a plain duck-typed object instead.
+    function createGoogleDocsResizePlugin(editor) {
+      var pluginKey = {}; // unique identity, only used for object equality
+
+      return {
+        key: pluginKey,
+        props: {},
+        spec: {
+          key: pluginKey,
+          appendTransaction: function (transactions, oldState, newState) {
+            if (!transactions.some(function (t) { return t.docChanged; })) return null;
+            if (!transactions.every(isAttrOnlyTransaction)) return null;
+
+            var fixupTr = newState.tr;
+            var touchedAnyTable = false;
+
+            newState.doc.descendants(function (node, pos) {
+              if (node.type.name !== 'table') return true;
+
+              // The dragged column + its requested PIXEL width come
+              // straight off the stock plugin's own colwidth write in the
+              // NEW state — we never persist colwidth ourselves, so this
+              // is empty except for the one column actively being
+              // dragged right now.
+              var dragged = getDraggedColumnPx(node);
+              if (!dragged) return true;
+
+              // Container width = the table's actual current rendered
+              // width, measured fresh on every tick. This stays stable
+              // across a single drag — it's driven by the editor's own
+              // CSS width (table-layout:fixed + width:100%), never by
+              // anything this plugin writes — so reading it here is safe
+              // even though the DOM hasn't repainted for THIS tick's
+              // transaction yet.
+              var dom = editor.view.nodeDOM(pos);
+              while (dom && dom.tagName !== 'TABLE') dom = dom.parentElement;
+              var containerPx = dom ? dom.getBoundingClientRect().width : 0;
+              if (!containerPx) return true;
+
+              var requestedPct = (dragged.px / containerPx) * 100;
+
+              var oldFound = findEnclosingTable(oldState, Math.min(pos + 1, oldState.doc.content.size - 1));
+              var oldTable = oldFound ? oldFound.table : null;
+              if (!oldTable) return true;
+
+              var oldInfo = getExistingColumnPcts(oldTable);
+              if (oldInfo.pcts.length !== dragged.mapWidth) return true;
+
+              var baseline;
+              if (oldInfo.hasAny && oldInfo.pcts.every(function (p) { return p != null; })) {
+                baseline = oldInfo.pcts.slice();
+              } else {
+                baseline = seedColumnPcts(editor, pos, dragged.mapWidth);
+              }
+
+              var corrected = redistribute(baseline, dragged.col, requestedPct);
+              applyColumnPcts(fixupTr, pos, node, corrected);
+              touchedAnyTable = true;
+              return false; // don't descend into this table's own children
+            });
+
+            return touchedAnyTable ? fixupTr : null;
+          }
+        }
+      };
+    }
+
+    window.installGoogleDocsTableResize = function (editor) {
+      if (!editor || editor.__gdocsResizeInstalled) return;
+      try {
+        var plugin = createGoogleDocsResizePlugin(editor);
+        if (!plugin) return;
+        if (typeof editor.registerPlugin !== 'function') {
+          console.warn('[GDocsResize] editor.registerPlugin is not available on this Tiptap version — cannot install');
+          return;
+        }
+        editor.registerPlugin(plugin);
+        editor.__gdocsResizeInstalled = true;
+        console.log('[GDocsResize] installed for editor instance', editor.instanceId || editor);
+      } catch (err) {
+        console.warn('[GDocsResize] install failed for this editor instance', err);
+      }
+    };
+  })();
+
+  // ---------------------------------------------------------------------
+  // BUG FIX 1 — Exit list on Backspace
+  // ---------------------------------------------------------------------
+  // Stock Tiptap normally lets you exit a list by pressing Enter on an
+  // empty list item (via ListKeymap). That isn't surfacing reliably in
+  // this Bubble-wrapped build. Per product decision, we instead make
+  // Backspace on an empty list item explicitly toggle the active list off
+  // for that item (lifting it out as a plain paragraph) instead of merging
+  // with the previous line.
+  //
+  // Same registerPlugin() mechanism as the GDocsResize plugin above —
+  // EditorState only reads plugin.props off a plugin object (duck-typed,
+  // no instanceof check, confirmed in section 12 of the reference .md),
+  // so props.handleKeyDown works the same way appendTransaction did there.
+  function isCursorAtEmptyListItemStart(editor) {
+    var sel = editor.state.selection;
+    if (!sel.empty) return false;
+    var $from = sel.$from;
+    // Cursor must be at the very start of an empty paragraph...
+    if ($from.parent.type.name !== 'paragraph' || $from.parent.content.size !== 0) return false;
+    if ($from.parentOffset !== 0) return false;
+    // ...that paragraph must live inside a listItem somewhere up the tree.
+    for (var d = $from.depth; d >= 0; d--) {
+      if ($from.node(d).type.name === 'listItem') return true;
+    }
+    return false;
+  }
+
+  function createListExitPlugin(editor) {
+    var pluginKey = {};
+    return {
+      key: pluginKey,
+      props: {
+        handleKeyDown: function (view, event) {
+          if (event.key !== 'Backspace') return false;
+          if (!isCursorAtEmptyListItemStart(editor)) return false;
+
+          if (editor.isActive('bulletList')) {
+            event.preventDefault();
+            editor.chain().focus().toggleBulletList().run();
+            return true;
+          }
+          if (editor.isActive('orderedList')) {
+            event.preventDefault();
+            editor.chain().focus().toggleOrderedList().run();
+            return true;
+          }
+          return false;
+        }
+      },
+      spec: { key: pluginKey }
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // BUG FIX 2 — Trailing-paragraph escape route after tables
+  // ---------------------------------------------------------------------
+  // Confirmed via the extension manifest (reference .md section 2):
+  // `gapcursor` is NOT one of the extensions actually loaded in this
+  // Tiptap build, regardless of the "Gapcursor: yes" toggle in the Bubble
+  // plugin's settings panel. No gapcursor decoration will ever be drawn,
+  // so a CSS fix alone cannot help — the only reliable fix is to guarantee
+  // a real paragraph node always exists immediately after a top-level
+  // table, so there's always an ordinary cursor position to land in.
+  //
+  // We do this structurally via appendTransaction (same pattern as
+  // GDocsResize), which self-heals the invariant for every path a table
+  // can end up without a trailing paragraph: insertTable() from either
+  // toolbar, paste, undo/redo, or loading previously-saved HTML that
+  // predates this fix.
+  function findTablesMissingTrailingParagraph(doc) {
+    var positions = [];
+    doc.forEach(function (node, offset, index) {
+      if (node.type.name !== 'table') return;
+      var hasNext = index + 1 < doc.childCount;
+      var nextIsParagraph = hasNext && doc.child(index + 1).type.name === 'paragraph';
+      if (!nextIsParagraph) positions.push(offset + node.nodeSize);
+    });
+    return positions;
+  }
+
+  function createTableEscapeRoutePlugin(editor) {
+    var pluginKey = {};
+    return {
+      key: pluginKey,
+      props: {},
+      spec: {
+        key: pluginKey,
+        appendTransaction: function (transactions, oldState, newState) {
+          if (!transactions.some(function (t) { return t.docChanged; })) return null;
+
+          var doc = newState.doc;
+          var paragraphType = doc.type.schema.nodes.paragraph;
+          if (!paragraphType) return null;
+
+          var positions = findTablesMissingTrailingParagraph(doc);
+          if (!positions.length) return null;
+
+          var tr = newState.tr;
+          // Insert from the end backwards so earlier positions in the
+          // list stay valid without needing to map them.
+          positions.sort(function (a, b) { return b - a; });
+          positions.forEach(function (pos) { tr.insert(pos, paragraphType.create()); });
+          return tr;
+        }
+      }
+    };
+  }
+
+  // One-time fixup for tables that already exist in content loaded BEFORE
+  // this plugin was installed (e.g. previously-saved HTML from before this
+  // fix shipped). appendTransaction only runs on transactions dispatched
+  // after the plugin is registered, so the initial setContent load needs
+  // this separate pass.
+  function ensureTrailingParagraphAfterTables(editor) {
+    var doc = editor.state.doc;
+    var paragraphType = doc.type.schema.nodes.paragraph;
+    if (!paragraphType) return;
+    var positions = findTablesMissingTrailingParagraph(doc);
+    if (!positions.length) return;
+    var tr = editor.state.tr;
+    positions.sort(function (a, b) { return b - a; });
+    positions.forEach(function (pos) { tr.insert(pos, paragraphType.create()); });
+    editor.view.dispatch(tr);
+  }
+
+  window.installListExitAndTableEscapeRoute = function (editor) {
+    if (!editor || editor.__listExitTableEscapeInstalled) return;
+    try {
+      if (typeof editor.registerPlugin !== 'function') {
+        console.warn('[ListExit/TableEscape] editor.registerPlugin is not available on this Tiptap version — cannot install');
+        return;
+      }
+      editor.registerPlugin(createListExitPlugin(editor));
+      editor.registerPlugin(createTableEscapeRoutePlugin(editor));
+      editor.__listExitTableEscapeInstalled = true;
+      ensureTrailingParagraphAfterTables(editor);
+      console.log('[ListExit/TableEscape] installed for editor instance', editor.instanceId || editor);
+    } catch (err) {
+      console.warn('[ListExit/TableEscape] install failed for this editor instance', err);
+    }
+  };
+
+  // ---------------------------------------------------------------------
+  // Defensive gapcursor CSS (belt-and-suspenders only — see note above:
+  // this extension isn't actually loaded in the current manifest, so this
+  // has no visible effect today. Harmless to keep in case a future plugin
+  // update adds it back; the real fix is the appendTransaction plugin.)
+  // ---------------------------------------------------------------------
+  (function injectGapcursorCSS() {
+    if (document.getElementById('huzlly-gapcursor-css')) return;
+    var style = document.createElement('style');
+    style.id = 'huzlly-gapcursor-css';
+    style.textContent =
+      '.ProseMirror-gapcursor{display:none;pointer-events:none;position:relative;}' +
+      '.ProseMirror-gapcursor:after{content:"";display:block;position:absolute;top:-2px;' +
+      'width:20px;border-top:1px solid #333;animation:huzlly-gapcursor-blink 1.1s steps(2,start) infinite;}' +
+      '@keyframes huzlly-gapcursor-blink{to{visibility:hidden;}}' +
+      '.ProseMirror-focused .ProseMirror-gapcursor{display:block;}';
+    document.head.appendChild(style);
+  })();
+
+  function bindEditor(editor) {
+    if (!editor || boundEditors.has(editor)) return;
+    boundEditors.add(editor);
+
+    // Google-Docs-style fixed-total-width column resizing (see section 12
+    // of the reference .md for the full explanation). Must run once per
+    // editor instance — safe to call repeatedly, it no-ops after first install.
+    installGoogleDocsTableResize(editor);
+
+    // List-exit-on-Backspace + table trailing-paragraph escape route (see
+    // the two blocks immediately above). Same idempotent-install pattern.
+    installListExitAndTableEscapeRoute(editor);
+
+    var selectionDebounceTimer = null;
+    editor.on('selectionUpdate', function () {
+      if (selectionDebounceTimer) clearTimeout(selectionDebounceTimer);
+      selectionDebounceTimer = setTimeout(function () {
+        var sel = editor.state.selection;
+        if (sel.empty) {
+          scheduleHide(editor);
+        } else if (isCellSelection(editor)) {
+          // A multi-cell drag-selection. This is a structural table
+          // selection, not text — don't show the text-formatting Bubble
+          // Menu for it. checkTableContext (below) handles showing the
+          // Table Toolbar for this case instead.
+          scheduleHide(editor);
+        } else if (!isMouseDown) {
+          // Only show on selectionUpdate if this selection was NOT made by
+          // an active mouse drag (e.g. keyboard Shift+Arrow selection, or
+          // a programmatic selection change). While dragging, we wait for
+          // 'mouseup' (above) to show the menu, so it appears only once
+          // the selection is finalized — not character-by-character mid-drag.
+          showMenuFor(editor);
+        }
+        // If isMouseDown is true here, we deliberately do nothing — the
+        // mouseup handler will show the menu once the drag finishes.
+
+        // Table toolbar visibility is independent of text-selection state —
+        // it only cares whether the cursor sits inside a table cell, so we
+        // check it on every selection update regardless of empty/non-empty.
+        checkTableContext(editor);
+
+        // Floating menu: show only when cursor is on an empty paragraph.
+        checkFloatingMenuContext(editor);
+      }, 20); // tiny debounce: lets transient/stale states during focus
+              // transitions settle before we decide to show the menu
+    });
+
+    // Floating menu: also check on focus — covers the case where user clicks
+    // an empty line that was already the cursor position (selectionUpdate
+    // may not fire if the selection didn't actually change).
+    editor.on('focus', function () {
+      setTimeout(function () { checkFloatingMenuContext(editor); }, 20);
+    });
+
+    editor.on('blur', function () {
+      // small delay: if the blur happened because the user clicked our
+      // menu button, we don't want to hide before the command runs
+      scheduleHide(editor);
+      scheduleFloatingHide(editor);
+      // NOTE: we deliberately do NOT call scheduleTableHide on blur.
+      // Blur fires whenever the mouse moves outside the editor without
+      // clicking, but the cursor is still inside the table cell — the
+      // Table Toolbar should stay visible. It hides only when selectionUpdate
+      // confirms the cursor has actually left the table, or the editor is
+      // destroyed. Hiding on blur was causing the toolbar to disappear
+      // whenever the user moved their mouse away after clicking a cell.
+    });
+
+    // RIGHT-CLICK → show bubble menu at cursor position.
+    //
+    // contextmenu fires on the editor's own DOM node (not document) so we
+    // only intercept right-clicks INSIDE this specific editor instance —
+    // right-clicks elsewhere on the page are unaffected.
+    //
+    // Behaviour:
+    //   • e.preventDefault() suppresses the browser's native context menu.
+    //   • If text is selected (non-empty selection), position the menu at
+    //     the right-click point (not the selection midpoint) — the user
+    //     may have right-clicked somewhere other than the selected text.
+    //   • If no text is selected (collapsed cursor / empty editor), still
+    //     show the menu at the click point so the user has access to Insert
+    //     Table, Insert Image, HR, headings, etc.
+    //   • CellSelection (multi-cell drag) is excluded — the Table Toolbar
+    //     already handles that context; showing the Bubble Menu on top
+    //     would be confusing.
+    editor.view.dom.addEventListener('contextmenu', function (e) {
+      // Don't intercept if a modifier key is held (lets OS/browser handle
+      // inspect-element or other devtools shortcuts normally).
+      if (e.ctrlKey || e.metaKey) return;
+
+      // CellSelection → let the Table Toolbar own this context.
+      if (isCellSelection(editor)) return;
+
+      e.preventDefault();
+
+      // Cancel any pending hide that might be in flight (e.g. from a
+      // prior blur event that fired just before the right-click).
+      if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+
+      // Hide Table Toolbar and Floating Menu — right-click on the editor
+      // body means the Bubble Menu should be the only thing showing.
+      if (tableHideTimer) { clearTimeout(tableHideTimer); tableHideTimer = null; }
+      tableToolbar.style.display = 'none';
+      tableActiveEditor = null;
+      hideFloatingSystem();
+
+      showMenuForAtCoords(editor, e.clientX, e.clientY);
+    });
+
+    // NOTE: we deliberately do NOT show the menu on 'focus'. ProseMirror can
+    // briefly report a stale/non-empty selection during the focus
+    // transition (e.g. tapping into a different editor without dragging to
+    // select text), which caused a momentary menu "flash". The
+    // 'selectionUpdate' event below is the reliable signal for deliberate
+    // text selection, so menu visibility is driven from there only.
+
+    editor.on('destroy', function () {
+      if (activeEditor === editor) {
+        menu.style.display = 'none';
+        activeEditor = null;
+      }
+      if (linkPopoverEditor === editor) {
+        closeLinkPopover();
+      }
+      if (imagePopoverEditor === editor) {
+        closeImagePopover();
+      }
+      if (tableActiveEditor === editor) {
+        tableToolbar.style.display = 'none';
+        tableActiveEditor = null;
+      }
+      if (floatingActiveEditor === editor) {
+        hideFloatingSystem();
+      }
+    });
+  }
+
+  function scanForEditors() {
+    var nodes = document.querySelectorAll('.ProseMirror');
+    nodes.forEach(function (node) {
+      var editor = node.editor;
+      if (editor) {
+        bindEditor(editor);
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // TABLE TOOLBAR — separate floating toolbar, shown only when the cursor
+  // is inside a table cell. Independent of the text-selection Bubble Menu
+  // above (different trigger condition: cursor position, not selection).
+  // ---------------------------------------------------------------------
+  var tableToolbar = document.createElement('div');
+  tableToolbar.id = 'huzlly-table-toolbar';
+  tableToolbar.style.cssText = [
+    'position:fixed',
+    'top:0',
+    'left:0',
+    'z-index:9999',
+    'display:none',
+    'background:#1f1f1f',
+    'border-radius:8px',
+    'box-shadow:0 4px 14px rgba(0,0,0,0.25)',
+    'padding:4px',
+    'gap:2px',
+    'flex-direction:row',
+    'align-items:center',
+    'font-family:DM Sans, Helvetica, Arial, sans-serif'
+  ].join(';');
+
+  var tableActiveEditor = null;
+  var tableHideTimer = null;
+  var activeDropdown = null; // which dropdown panel is currently open
+
+  // -------------------------------------------------------------------
+  // STYLES — injected once into <head>
+  // -------------------------------------------------------------------
+  var borderStyleTag = document.createElement('style');
+  borderStyleTag.textContent =
+    // Default grid baseline. NOTE: width:100% + table-layout:fixed here is
+    // NOT itself the fix for the resize-overflow bug — it's just the
+    // initial layout before any column has an explicit width. The actual
+    // fixed-total-width guarantee (now in PERCENT, not pixels — see the
+    // big comment above the GOOGLE-DOCS-STYLE COLUMN RESIZING plugin)
+    // comes from installGoogleDocsTableResize, which keeps every cell's
+    // own style="width:%" summing to exactly 100. table-layout:fixed is
+    // required for those percentages to apply per-column instead of
+    // shrinking/growing to content. min-width below is just a readability
+    // floor (px, absolute on purpose — it's a UI safety net, not part of
+    // the portability math) and is independent of that plugin's MIN_COL_PCT.
+    '.ProseMirror table { border-collapse: collapse; width: 100%; table-layout: fixed; }' +
+    '.ProseMirror table td, .ProseMirror table th { border: 1px solid #ced4da !important; min-width: 40px; word-break: break-word; }' +
+    // Wrap table in a scrollable container so drag-resize beyond editor width
+    // shows a scrollbar INSIDE the editor block, not on the page/Bubble wrapper.
+    // overflow-x:auto on .ProseMirror itself handles horizontal overflow cleanly.
+    // overflow-y:visible keeps vertical content (dropdowns etc.) from clipping.
+    '.ProseMirror { overflow-x: auto; overflow-y: visible; }' +
+    // The column-resize handle is position:absolute — it must not trigger a
+    // horizontal scrollbar on its own. Negative left offset of the handle
+    // (it straddles the cell border) was causing the left-side scrollbar flash.
+    '.ProseMirror .column-resize-handle { position: absolute; right: -2px; top: 0; bottom: 0; width: 4px; background: #7F77DD; pointer-events: none; z-index: 20; }' +
+    // Prevent the resize cursor zone from leaking outside ProseMirror bounds
+    '.ProseMirror { position: relative; }' +
+    // CellSelection highlight overlay
+    '.ProseMirror table td, .ProseMirror table th { position: relative; }' +
+    '.ProseMirror .selectedCell:after { content: ""; position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(127, 119, 221, 0.3); pointer-events: none; }' +
+    // Dropdown panel styles
+    '.huzlly-dropdown { position:absolute; top:calc(100% + 6px); left:50%; transform:translateX(-50%);' +
+    '  background:#1f1f1f; border-radius:8px; box-shadow:0 6px 20px rgba(0,0,0,0.35);' +
+    '  padding:4px; display:none; flex-direction:column; gap:2px; min-width:180px; z-index:10000; }' +
+    '.huzlly-dropdown.open { display:flex; }' +
+    // Flip upward when toolbar is near top of viewport (class toggled in JS)
+    '.huzlly-dropdown.flip { top:auto; bottom:calc(100% + 6px); }' +
+    '.huzlly-dropdown-item { display:flex; align-items:center; gap:8px; padding:6px 10px;' +
+    '  border:none; background:transparent; color:#fff; border-radius:6px; cursor:pointer;' +
+    '  font-family:DM Sans,Helvetica,Arial,sans-serif; font-size:13px; white-space:nowrap; width:100%; text-align:left; }' +
+    '.huzlly-dropdown-item:hover { background:#534AB7; }' +
+    '.huzlly-dropdown-item.active { background:#7F77DD; }' +
+    '.huzlly-dropdown-separator { height:1px; background:#333; margin:3px 6px; }' +
+    // Group trigger button styles (shared with bubble menu makeButton style)
+    '.huzlly-group-btn { border:none; background:transparent; color:#fff; height:30px;' +
+    '  border-radius:6px; cursor:pointer; display:flex; align-items:center; gap:5px;' +
+    '  padding:0 8px; font-family:DM Sans,Helvetica,Arial,sans-serif; font-size:12px;' +
+    '  font-weight:500; white-space:nowrap; position:relative; }' +
+    '.huzlly-group-btn:hover, .huzlly-group-btn.open { background:#534AB7; }' +
+    '.huzlly-group-btn .huzlly-chevron { opacity:0.6; margin-left:1px; }';
+  document.head.appendChild(borderStyleTag);
+
+  // -------------------------------------------------------------------
+  // HELPERS
+  // -------------------------------------------------------------------
+  // NOTE: getActiveTableElement() and getTableCellRange() used to live here —
+  // they backed a "Select Entire Table" feature (via setCellSelection) that
+  // was removed by product decision (see the comment above deleteTableIconBtn
+  // below). Neither was called anywhere else, so they were deleted rather
+  // than kept as unused dead code. If "select whole table" ever comes back,
+  // the approach was: walk $from up to the enclosing `table` node, find the
+  // doc positions of its first and last tableCell/tableHeader descendants via
+  // `.descendants()`, then call `editor.commands.setCellSelection({ anchorCell, headCell })`.
+  function closeActiveDropdown() {
+    if (activeDropdown) {
+      activeDropdown.classList.remove('open');
+      var triggerBtn = activeDropdown.parentElement && activeDropdown.parentElement.querySelector('.huzlly-group-btn');
+      if (triggerBtn) triggerBtn.classList.remove('open');
+      activeDropdown = null;
+    }
+  }
+
+  // Small chevron SVG for group buttons.
+  function chevronSvg() {
+    return '<svg class="huzlly-chevron" viewBox="0 0 256 256" width="10" height="10" fill="currentColor">' +
+      '<path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"/>' +
+      '</svg>';
+  }
+
+  // -------------------------------------------------------------------
+  // DROPDOWN GROUP BUILDER
+  // makeGroup(label, iconKey, items) → a wrapper div containing:
+  //   - a trigger button (label + icon + chevron)
+  //   - a dropdown panel with item rows
+  //
+  // Each item: { iconKey, label, onClick }
+  //            OR { separator: true }
+  //            OR { iconKey, label, onClick, isToggle: true, getActive: fn }
+  // -------------------------------------------------------------------
+  function makeGroup(label, iconKey, items) {
+    var wrapper = document.createElement('div');
+    wrapper.style.cssText = 'position:relative;display:flex;align-items:center;';
+
+    // Trigger button
+    var trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'huzlly-group-btn';
+    trigger.innerHTML = iconSvg(ICONS[iconKey]) + '<span>' + label + '</span>' + chevronSvg();
+
+    // Dropdown panel
+    var panel = document.createElement('div');
+    panel.className = 'huzlly-dropdown';
+
+    items.forEach(function (item) {
+      if (item.separator) {
+        var sep = document.createElement('div');
+        sep.className = 'huzlly-dropdown-separator';
+        panel.appendChild(sep);
+        return;
+      }
+
+      if (item.heading) {
+        var hdg = document.createElement('div');
+        hdg.style.cssText = 'padding:4px 10px 2px;font-size:10px;font-weight:600;color:#888;' +
+          'text-transform:uppercase;letter-spacing:0.06em;font-family:DM Sans,Helvetica,Arial,sans-serif;';
+        hdg.textContent = item.heading;
+        panel.appendChild(hdg);
+        return;
+      }
+
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'huzlly-dropdown-item';
+      row.innerHTML = '<span>' + item.label + '</span>';
+
+      // For toggle items (currently: align toggles) reflect active state on open.
+      // getActive is stashed directly on the row (not just documented) so
+      // syncDropdownToggleStates can call the SAME function the item defines,
+      // instead of a second hand-rolled copy of the same check living in two
+      // places and silently drifting apart.
+      if (item.isToggle) {
+        row.dataset.toggleItem = 'true';
+        row.dataset.toggleKey = item.label; // used by syncDropdownToggleStates
+        row.__getActive = item.getActive;   // function reference, not serializable to dataset
+      }
+
+      row.addEventListener('mousedown', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!tableActiveEditor) return;
+        item.onClick(tableActiveEditor, row);
+        // Refresh toggle item visuals without closing the dropdown,
+        // so user can see state change and toggle again if needed.
+        if (item.isToggle) {
+          syncDropdownToggleStates(panel);
+        } else {
+          closeActiveDropdown();
+        }
+        var ed = tableActiveEditor;
+        setTimeout(function () { checkTableContext(ed); }, 0);
+      });
+
+      panel.appendChild(row);
+    });
+
+    // Toggle dropdown open/close on trigger click
+    trigger.addEventListener('mousedown', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var isOpen = panel.classList.contains('open');
+      closeActiveDropdown();
+      if (!isOpen) {
+        // Flip upward if toolbar is near top of viewport
+        var toolbarRect = tableToolbar.getBoundingClientRect();
+        if (toolbarRect.top < 120) {
+          panel.classList.add('flip');
+        } else {
+          panel.classList.remove('flip');
+        }
+        panel.classList.add('open');
+        trigger.classList.add('open');
+        activeDropdown = panel;
+        syncDropdownToggleStates(panel);
+      }
+    });
+
+    wrapper.appendChild(trigger);
+    wrapper.appendChild(panel);
+    return wrapper;
+  }
+
+  // Refresh active/inactive visual state for all toggle rows in a panel.
+  // Called when a panel opens and after each toggle action.
+  function syncDropdownToggleStates(panel) {
+    if (!tableActiveEditor) return;
+    var rows = panel.querySelectorAll('[data-toggle-item]');
+    rows.forEach(function (row) {
+      if (typeof row.__getActive === 'function') {
+        row.classList.toggle('active', !!row.__getActive(tableActiveEditor));
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // BUILD THE 5 DROPDOWN GROUPS
+  // -------------------------------------------------------------------
+
+  // 1. ROWS
+  var rowsGroup = makeGroup('Rows', 'rowsPlusBottom', [
+    { iconKey: 'rowsPlusTop',    label: 'Add Row Above', onClick: function (ed) { ed.chain().focus().addRowBefore().run(); } },
+    { iconKey: 'rowsPlusBottom', label: 'Add Row Below', onClick: function (ed) { ed.chain().focus().addRowAfter().run(); } },
+    { separator: true },
+    { iconKey: 'trashSimple',    label: 'Delete Row',    onClick: function (ed) { ed.chain().focus().deleteRow().run(); } }
+  ]);
+
+  // 2. COLUMNS
+  var colsGroup = makeGroup('Columns', 'columnsPlusRight', [
+    { iconKey: 'columnsPlusLeft',  label: 'Add Column Left',  onClick: function (ed) { ed.chain().focus().addColumnBefore().run(); } },
+    { iconKey: 'columnsPlusRight', label: 'Add Column Right', onClick: function (ed) { ed.chain().focus().addColumnAfter().run(); } },
+    { separator: true },
+    { iconKey: 'trashSimple',      label: 'Delete Column',    onClick: function (ed) { ed.chain().focus().deleteColumn().run(); } }
+  ]);
+
+  // 3. CELLS — merge/split + vertical align
+  // Vertical align: setCellAttribute is Tiptap Tables' built-in command.
+  // Works on whatever cell the cursor is in (merged or not).
+  // NOTE: this modifies cell attributes through Tiptap's transaction system,
+  // so it IS undo-able.
+  function makeAlignItem(label, iconKey, alignValue) {
+    return {
+      iconKey: iconKey,
+      label: label,
+      isToggle: true,
+      getActive: function (ed) {
+        var attrs = ed.getAttributes('tableCell');
+        return ((attrs && attrs.verticalAlign) || 'top') === alignValue;
+      },
+      onClick: function (ed, row) {
+        ed.chain().focus().setCellAttribute('verticalAlign', alignValue).run();
+      }
+    };
+  }
+
+  var cellsGroup = makeGroup('Cells', 'squaresFour', [
+    { iconKey: 'squaresFour',           label: 'Merge Cells', onClick: function (ed) { ed.chain().focus().mergeCells().run(); } },
+    { iconKey: 'squareSplitHorizontal', label: 'Split Cell',  onClick: function (ed) { ed.chain().focus().splitCell().run(); } },
+    { separator: true },
+    { heading: 'Vertical Align' },
+    makeAlignItem('Align Top',    'rowsPlusTop',    'top'),
+    makeAlignItem('Align Middle', 'minus',          'middle'),
+    makeAlignItem('Align Bottom', 'rowsPlusBottom', 'bottom')
+  ]);
+
+  // NOTE: previously there was a post-build pass here that patched a
+  // `dataset.alignValue` onto each align row so syncDropdownToggleStates
+  // could re-derive active state by string-matching. That's gone now —
+  // each row carries its own `__getActive` function (set in makeGroup,
+  // from `item.getActive` in makeAlignItem below), so there's exactly one
+  // place that knows "is this row currently active," not two copies that
+  // could drift out of sync.
+
+  // 5. DELETE TABLE — standalone icon button directly on toolbar (no dropdown).
+  // Removed the "Table" dropdown group + "Select Entire Table" option since
+  // selecting the whole table had no actionable follow-up in this workflow.
+  var deleteTableIconBtn = document.createElement('button');
+  deleteTableIconBtn.type = 'button';
+  deleteTableIconBtn.title = 'Delete Table';
+  deleteTableIconBtn.innerHTML = iconSvg(ICONS['trashSimple']);
+  deleteTableIconBtn.style.cssText = [
+    'border:none',
+    'background:transparent',
+    'color:#fff',
+    'width:32px',
+    'height:32px',
+    'border-radius:6px',
+    'cursor:pointer',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'padding:0',
+    'flex-shrink:0'
+  ].join(';');
+  deleteTableIconBtn.addEventListener('mouseenter', function () {
+    deleteTableIconBtn.style.background = '#534AB7';
+  });
+  deleteTableIconBtn.addEventListener('mouseleave', function () {
+    deleteTableIconBtn.style.background = 'transparent';
+  });
+  deleteTableIconBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!tableActiveEditor) return;
+    closeActiveDropdown();
+    tableActiveEditor.chain().focus().deleteTable().run();
+  });
+
+  // -------------------------------------------------------------------
+  // ASSEMBLE TOOLBAR
+  // -------------------------------------------------------------------
+  function makeTableSeparator() {
+    var sep = document.createElement('div');
+    sep.style.cssText = 'width:1px;height:20px;background:#444;margin:0 2px;flex-shrink:0;';
+    return sep;
+  }
+
+  [rowsGroup, makeTableSeparator(), colsGroup, makeTableSeparator(),
+   cellsGroup, makeTableSeparator(), deleteTableIconBtn
+  ].forEach(function (el) { tableToolbar.appendChild(el); });
+
+  // Same reasoning as the bubble menu above — body is always present here.
+  document.body.appendChild(tableToolbar);
+
+  // Keep dropdown open when hovering into it; cancel any pending hide.
+  tableToolbar.addEventListener('mouseenter', function () {
+    if (tableHideTimer) {
+      clearTimeout(tableHideTimer);
+      tableHideTimer = null;
+    }
+  });
+  // mouseleave on the toolbar intentionally NOT used to hide —
+  // see earlier comment; hide is driven by selectionUpdate / outside click / destroy.
+
+  function scheduleTableHide(editor) {
+    if (tableActiveEditor !== editor) return;
+    if (tableHideTimer) clearTimeout(tableHideTimer);
+    tableHideTimer = setTimeout(function () {
+      closeActiveDropdown();
+      tableToolbar.style.display = 'none';
+      tableActiveEditor = null;
+    }, HIDE_DELAY_MS);
+  }
+
+  function positionTableToolbar(editor) {
+    try {
+      var pos = editor.state.selection.$from.pos;
+      var coords = editor.view.coordsAtPos(pos);
+
+      tableToolbar.style.display = 'flex';
+      var rect = tableToolbar.getBoundingClientRect();
+
+      var finalLeft = coords.left - rect.width / 2;
+      var finalTop = coords.top - rect.height - 8;
+
+      var viewportWidth = window.innerWidth;
+      if (finalLeft < 8) finalLeft = 8;
+      if (finalLeft + rect.width > viewportWidth - 8) {
+        finalLeft = viewportWidth - rect.width - 8;
+      }
+      if (finalTop < 8) {
+        finalTop = coords.bottom + 8;
+      }
+
+      tableToolbar.style.top = finalTop + 'px';
+      tableToolbar.style.left = finalLeft + 'px';
+    } catch (err) {
+      console.warn('[Huzlly Table Toolbar] positioning error', err);
+    }
+  }
+
+  function showTableToolbarFor(editor) {
+    if (tableHideTimer) {
+      clearTimeout(tableHideTimer);
+      tableHideTimer = null;
+    }
+    tableActiveEditor = editor;
+    positionTableToolbar(editor);
+  }
+
+  // Walk up the selection's node path to see if the cursor is inside a
+  // table cell/header. We try editor.isActive() first (Tiptap's own,
+  // version-stable API); the manual path-walk below is a fallback in case
+  // 'table' isn't registered as a direct isActive() target in some setups.
+  function isCursorInsideTable(editor) {
+    try {
+      if (editor.isActive('tableCell') || editor.isActive('tableHeader')) {
+        return true;
+      }
+    } catch (e) {
+      // isActive can throw if the node type isn't registered; fall through
+      // to the manual check below.
+    }
+    try {
+      var sel = editor.state.selection;
+      // NOTE: `$from.path` is an internal ProseMirror ResolvedPos property
+      // (alternating [node, index, node, index, ...] ancestry array). It is
+      // NOT part of the public PM API and could be renamed/restructured in a
+      // future ProseMirror version. This fallback only runs if editor.isActive()
+      // throws (e.g. node type not registered), which shouldn't happen with this
+      // plugin's confirmed extension manifest. If the plugin is ever updated and
+      // this breaks, replace with: walk $from.depth → $from.node(depth).type.name
+      var path = sel.$from.path; // alternating [node, index, node, index, ...]
+      for (var i = 0; i < path.length; i++) {
+        var node = path[i];
+        if (node && node.type && (node.type.name === 'tableCell' || node.type.name === 'tableHeader')) {
+          return true;
+        }
+      }
+    } catch (e) {
+      console.warn('[Huzlly Table Toolbar] table-detection error', e);
+    }
+    return false;
+  }
+
+  function checkTableContext(editor) {
+    // NOTE: deliberately NOT checking editor.isFocused here. Bubble's
+    // environment unreliably reports isFocused: false at the exact moment
+    // selectionUpdate fires (documented in section 7 / the floating-menu fix) —
+    // it's especially noticeable right after interacting with the dropdown's
+    // buttons. The selectionUpdate event firing at all is sufficient proof the
+    // editor is the one being interacted with; relying on isFocused here was
+    // causing the Table Toolbar (and any open dropdown) to force-hide instead
+    // of repositioning whenever a different cell was clicked.
+    if (!editor) {
+      scheduleTableHide(editor);
+      return;
+    }
+    // Priority rule: if the user has an active TEXT selection (not just a
+    // collapsed cursor), the Bubble Menu takes priority over the Table
+    // Toolbar — even if that selection happens to be inside a table cell.
+    // This prevents the two floating toolbars from overlapping when text
+    // is selected inside a cell.
+    //
+    // Exception: a CellSelection (multi-cell drag, or the "Select Entire
+    // Table" button) is also "non-empty" but is a structural table
+    // selection, not text — for this case the Table Toolbar IS what should
+    // show (e.g. to merge the selected cells), so we don't apply the
+    // text-selection priority rule here.
+    if (!editor.state.selection.empty && !isCellSelection(editor)) {
+      scheduleTableHide(editor);
+      return;
+    }
+    if (isCursorInsideTable(editor) || isCellSelection(editor)) {
+      showTableToolbarFor(editor);
+    } else {
+      scheduleTableHide(editor);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // FLOATING TRIGGER — '+' button shown to the left of an empty paragraph.
+  // Clicking it slides in a menu (same line, to the right of the button).
+  // ---------------------------------------------------------------------
+
+  // Inject floating menu animation styles
+  var floatingStyleTag = document.createElement('style');
+  floatingStyleTag.textContent =
+    '#huzlly-plus-btn { transition: opacity 0.15s ease; }' +
+    '#huzlly-floating-menu {' +
+    '  transition: opacity 0.18s ease, transform 0.18s ease;' +
+    '  opacity: 0; transform: translateX(-8px); pointer-events: none;' +
+    '}' +
+    '#huzlly-floating-menu.fm-open {' +
+    '  opacity: 1; transform: translateX(0); pointer-events: auto;' +
+    '}';
+  document.head.appendChild(floatingStyleTag);
+
+  // '+' trigger button
+  var plusBtn = document.createElement('button');
+  plusBtn.id = 'huzlly-plus-btn';
+  plusBtn.type = 'button';
+  plusBtn.title = 'Insert block';
+  plusBtn.innerHTML = '<svg viewBox="0 0 256 256" width="16" height="16" fill="currentColor" style="display:block;pointer-events:none;"><path d="M228,128a12,12,0,0,1-12,12H140v76a12,12,0,0,1-24,0V140H40a12,12,0,0,1,0-24h76V40a12,12,0,0,1,24,0v76h76A12,12,0,0,1,228,128Z"/></svg>';
+  plusBtn.style.cssText = [
+    'position:fixed',
+    'z-index:9998',
+    'display:none',
+    'width:24px',
+    'height:24px',
+    'border-radius:6px',
+    'border:none',
+    'background:#2a2a2a',
+    'color:#aaa',
+    'cursor:pointer',
+    'align-items:center',
+    'justify-content:center',
+    'padding:0',
+    'box-shadow:0 1px 4px rgba(0,0,0,0.3)'
+  ].join(';');
+
+  // Slide-in floating menu (appears to the right of '+' button)
+  var floatingMenu = document.createElement('div');
+  floatingMenu.id = 'huzlly-floating-menu';
+  floatingMenu.style.cssText = [
+    'position:fixed',
+    'z-index:9999',
+    'display:none',
+    'background:#1f1f1f',
+    'border-radius:8px',
+    'box-shadow:0 4px 14px rgba(0,0,0,0.25)',
+    'padding:4px',
+    'gap:2px',
+    'flex-direction:row',
+    'align-items:center',
+    'font-family:DM Sans, Helvetica, Arial, sans-serif'
+  ].join(';');
+
+  var floatingActiveEditor = null;
+  var floatingHideTimer = null;
+  var floatingMenuOpen = false;
+
+  function makeFloatingButton(iconKey, title, onClick) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.title = title;
+    btn.innerHTML = iconSvg(ICONS[iconKey]);
+    btn.style.cssText = [
+      'border:none',
+      'background:transparent',
+      'color:#fff',
+      'width:32px',
+      'height:32px',
+      'border-radius:6px',
+      'cursor:pointer',
+      'display:flex',
+      'align-items:center',
+      'justify-content:center',
+      'padding:0'
+    ].join(';');
+    btn.addEventListener('mouseenter', function () { btn.style.background = '#534AB7'; });
+    btn.addEventListener('mouseleave', function () { btn.style.background = 'transparent'; });
+    btn.addEventListener('mousedown', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!floatingActiveEditor) return;
+      onClick(floatingActiveEditor);
+      hideFloatingSystem();
+    });
+    return btn;
+  }
+
+  var fTableBtn   = makeFloatingButton('table',       'Insert Table',   function (ed) { ed.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(); });
+  var fBulletBtn  = makeFloatingButton('listBullets', 'Bullet List',    function (ed) { ed.chain().focus().toggleBulletList().run(); });
+  var fOrderedBtn = makeFloatingButton('listNumbers', 'Numbered List',  function (ed) { ed.chain().focus().toggleOrderedList().run(); });
+  var fHrBtn      = makeFloatingButton('minus',       'Horizontal Rule',function (ed) { ed.chain().focus().setHorizontalRule().run(); });
+
+  // Image button in floating menu — built manually so it does NOT call
+  // hideFloatingSystem() on click (the image popover needs to stay open).
+  var fImageBtn = document.createElement('button');
+  fImageBtn.type = 'button';
+  fImageBtn.title = 'Insert Image';
+  fImageBtn.innerHTML = iconSvg(ICONS['image']);
+  fImageBtn.style.cssText = [
+    'border:none',
+    'background:transparent',
+    'color:#fff',
+    'width:32px',
+    'height:32px',
+    'border-radius:6px',
+    'cursor:pointer',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'padding:0'
+  ].join(';');
+  fImageBtn.addEventListener('mouseenter', function () { fImageBtn.style.background = '#534AB7'; });
+  fImageBtn.addEventListener('mouseleave', function () { fImageBtn.style.background = 'transparent'; });
+  fImageBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!floatingActiveEditor) return;
+    if (imagePopoverEditor === floatingActiveEditor && imagePopover.style.display === 'flex') {
+      closeImagePopover();
+    } else {
+      openImagePopoverFor(floatingActiveEditor, fImageBtn);
+    }
+    // Intentionally NOT calling hideFloatingSystem() — the popover is now open.
+  });
+
+  [fTableBtn, makeSeparator(), fBulletBtn, fOrderedBtn, makeSeparator(), fHrBtn, makeSeparator(), fImageBtn]
+    .forEach(function (el) { floatingMenu.appendChild(el); });
+
+  document.body.appendChild(plusBtn);
+  document.body.appendChild(floatingMenu);
+
+  // Hide both '+' and slide-in menu completely
+  function hideFloatingSystem() {
+    floatingMenuOpen = false;
+    floatingMenu.classList.remove('fm-open');
+    // Wait for transition to finish before display:none
+    setTimeout(function () {
+      if (!floatingMenuOpen) {
+        floatingMenu.style.display = 'none';
+      }
+    }, 200);
+    plusBtn.style.display = 'none';
+    floatingActiveEditor = null;
+    if (floatingHideTimer) { clearTimeout(floatingHideTimer); floatingHideTimer = null; }
+  }
+
+  function scheduleFloatingHide(editor) {
+    if (floatingActiveEditor !== editor) return;
+    if (floatingHideTimer) clearTimeout(floatingHideTimer);
+    floatingHideTimer = setTimeout(function () {
+      hideFloatingSystem();
+    }, 300); // longer delay than bubble menu — '+' should stay stable
+  }
+
+  // Position '+' button to the left of the editor, vertically at cursor line.
+  // Menu appears immediately to the right of '+'.
+  function positionFloatingSystem(editor) {
+    try {
+      var pos = editor.state.selection.$from.pos;
+      var coords = editor.view.coordsAtPos(pos);
+      var editorDom = editor.view.dom;
+      var editorRect = editorDom.getBoundingClientRect();
+
+      // Vertical center: middle of the cursor line
+      var lineTop = coords.top;
+      var lineBottom = coords.bottom;
+      var lineHeight = lineBottom - lineTop;
+      var btnSize = 24;
+      var btnTop = lineTop + (lineHeight - btnSize) / 2;
+
+      // '+' sits 10px outside the editor's left edge
+      var btnLeft = editorRect.left - btnSize - 10;
+      // Clamp so it doesn't go off-screen left
+      if (btnLeft < 4) btnLeft = 4;
+
+      plusBtn.style.top  = btnTop + 'px';
+      plusBtn.style.left = btnLeft + 'px';
+      plusBtn.style.display = 'flex';
+
+      // Position menu: same vertical center, starting right after '+'
+      floatingMenu.style.display = 'flex';
+      var menuRect = floatingMenu.getBoundingClientRect();
+      var menuTop = lineTop + (lineHeight - menuRect.height) / 2;
+      var menuLeft = btnLeft + btnSize + 6; // 6px gap between '+' and menu
+
+      floatingMenu.style.top  = menuTop + 'px';
+      floatingMenu.style.left = menuLeft + 'px';
+    } catch (err) {
+      console.warn('[Huzlly Floating Menu] positioning error', err);
+    }
+  }
+
+  function showFloatingSystemFor(editor) {
+    if (floatingHideTimer) { clearTimeout(floatingHideTimer); floatingHideTimer = null; }
+    floatingActiveEditor = editor;
+    // Reset menu to hidden state (for re-positioning before animating)
+    floatingMenu.classList.remove('fm-open');
+    floatingMenuOpen = false;
+    positionFloatingSystem(editor);
+  }
+
+  // '+' click → open/close the slide-in menu
+  plusBtn.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (floatingMenuOpen) {
+      floatingMenu.classList.remove('fm-open');
+      floatingMenuOpen = false;
+    } else {
+      floatingMenuOpen = true;
+      // Trigger CSS transition
+      requestAnimationFrame(function () {
+        floatingMenu.classList.add('fm-open');
+      });
+    }
+  });
+
+  // Keep system alive when hovering '+' or menu
+  plusBtn.addEventListener('mouseenter', function () {
+    if (floatingHideTimer) { clearTimeout(floatingHideTimer); floatingHideTimer = null; }
+  });
+  floatingMenu.addEventListener('mouseenter', function () {
+    if (floatingHideTimer) { clearTimeout(floatingHideTimer); floatingHideTimer = null; }
+  });
+  // NOTE: no mouseleave hide — the '+' and menu stay visible as long as
+  // the cursor is on the empty paragraph. Hide is driven only by
+  // selectionUpdate (cursor moved to a different line), outside click,
+  // or editor destroy.
+
+  // Check whether the cursor is on an empty paragraph (not inside a table).
+  function isOnEmptyParagraph(editor) {
+    try {
+      var sel = editor.state.selection;
+      if (!sel.empty) return false;
+      var node = sel.$from.parent;
+      if (!node || node.type.name !== 'paragraph') return false;
+      if (node.content.size !== 0) return false;
+      if (editor.isActive('tableCell') || editor.isActive('tableHeader')) return false;
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function checkFloatingMenuContext(editor) {
+    if (!editor) {
+      scheduleFloatingHide(editor);
+      return;
+    }
+    if (isOnEmptyParagraph(editor)) {
+      showFloatingSystemFor(editor);
+    } else {
+      scheduleFloatingHide(editor);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // STARTUP: poll + observe for newly-rendered RG rows
+  // ---------------------------------------------------------------------
+  setInterval(scanForEditors, POLL_MS);
+
+  var domObserver = new MutationObserver(function () {
+    scanForEditors();
+  });
+  domObserver.observe(document.body, { childList: true, subtree: true });
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', scanForEditors);
+  } else {
+    scanForEditors();
+  }
+
+  // Manual trigger, useful for debugging in console
+  window.__huzllyScanEditors = scanForEditors;
+})();
+</script>
