@@ -1,7 +1,7 @@
 # Pickr Color Picker — Bubble.io Integration — Snapshot
 
-**Last updated:** June 26, 2026
-**Fixes covered:** #1–29 + housekeeping pass + UI polish pass (see session log below)
+**Last updated:** July 3, 2026
+**Fixes covered:** #1–31 + housekeeping pass + UI polish pass (see session log below)
 
 ---
 
@@ -11,6 +11,7 @@ Bubble.io project using a self-contained HTML element with the Pickr (`@simonwep
 
 **Files:**
 - `pickr-instance-element.html` — the full per-instance code (only `rawColor` and `fieldName` change between instances)
+- `pickr-library-loader.html` — single dedup-guarded loader for `pickr.min.js`, placed once inside the Reusable Element (Fix #31)
 - `README.md` — Bubble setup guide (HTML element, Toolbox plugin, workflows)
 - `pickr-snapshot.md` — this file
 
@@ -21,6 +22,7 @@ Bubble.io project using a self-contained HTML element with the Pickr (`@simonwep
 - One `JavascripttoBubble` element (`colorData` suffix) handles all instances on the page
 - `bubble_fn_colorData` guard (`safeBubbleSend`) prevents a ReferenceError if the Toolbox element hasn't initialized yet on first page load — payload is dropped silently but this race window is too small to matter in practice (user can't reach the picker before the bridge is ready)
 - `defaultColor` is intentionally mutated on each confirmed save as an in-memory cache — safe because Bubble re-renders resync `rawColor` on every save anyway
+- `pickr.min.js` is loaded exactly once per page via a single dedup-guarded loader element (`pickr-library-loader.html`), instead of once per instance (Fix #31)
 
 ---
 
@@ -120,6 +122,34 @@ Fix #21's claim-the-next-unclaimed pattern still had one theoretical failure mod
 
 ---
 
+### #31 ⭐ Single Pickr library load — deduplicated
+
+**Problem:** every one of the 10–15 duplicated Pickr instance elements shipped its own `<script src="pickr.min.js">` tag, creating 10–15 concurrent loads per page. This was the root cause behind the detachment race that Fix #30 patches around (orphaned retry polling for `Pickr` while a re-render removes the trigger node).
+
+**Attempted approaches, in order:**
+
+1. App-wide Head Code (Settings → SEO/metatags → Script/meta tags in header) — added the single script tag here. Verified via view-source that it was not rendering in the page's `<head>` at all. Root cause unconfirmed — possibly a propagation delay, possibly a Free-plan restriction, possibly requires an actual deploy (not just test-version save). Not resolved, left as an open question.
+2. Page-level SEO/metatags field (per-page HTML header, set on the Page itself rather than app-wide) — also did not take effect. Likely because the Pickr instances live inside a Reusable Element, which doesn't inherit the host page's header the same way.
+3. Single HTML element inside the Reusable Element (final, working approach) — placed one dedicated HTML element inside the Reusable Element, separate from the 10–15 per-field trigger elements (`pickr-library-loader.html`), containing:
+
+```html
+<script>
+if (!document.querySelector('script[src*="pickr.min.js"]')) {
+  var s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/pickr.min.js';
+  document.head.appendChild(s);
+}
+</script>
+```
+
+**Why the guard matters:** unlike a true page-load-once Head Code injection, this element lives inside a Reusable Element that can itself re-render. Without the `querySelector` dedup check, every re-render would insert another copy of the library — recreating the exact multi-load problem this fix exists to solve. The guard makes it safe regardless of how many times the Reusable Element remounts.
+
+**Verified:** `document.querySelectorAll('script[src*="pickr.min.js"]').length` returns `1` on load, in the Bubble editor preview (`version-test`).
+
+**Unchanged / still required:** Fix #30 (generation counter + `isConnected` guard) stays in place permanently in every per-instance script. It still covers the residual race window during the one remaining load, and covers any future re-render-while-loading edge case — this fix makes that window rare, not eliminated.
+
+---
+
 ### Housekeeping pass (no logic changes)
 - `dynamicPosition` variable removed — `'left-middle'` inlined directly into `Pickr.create()`
 - All Hindi inline comments replaced with English
@@ -167,3 +197,6 @@ Fix #21's claim-the-next-unclaimed pattern still had one theoretical failure mod
 - [ ] Trigger circle colour does not change mid-drag, only on auto-save or cancel-revert
 - [ ] No duplicate CANCEL button on parent Reusable Element re-render
 - [ ] Force a missing-trigger scenario (delete/rename a `.pickr-trigger-el` div on one instance) — confirm `bubble_fn_colorData` receives `error: 'no_trigger_found'` and existing workflows ignore it without side effects (Fix #28)
+- [ ] Force multiple Reusable Element re-renders in a row — confirm script count stays at `1` each time (Fix #31)
+- [ ] Confirm popup opens correctly across all 10–15 instances after this change (Fix #31)
+- [ ] Retest the original detach-while-open scenario (Fix #26/#30) now that load timing has changed (Fix #31)
