@@ -1,7 +1,7 @@
 # Pickr Color Picker — Bubble.io Integration — Snapshot
 
 **Last updated:** July 3, 2026
-**Fixes covered:** #1–31 + housekeeping pass + UI polish pass (see session log below)
+**Fixes covered:** #1–32 + housekeeping pass + UI polish pass (see session log below)
 
 ---
 
@@ -150,6 +150,22 @@ if (!document.querySelector('script[src*="pickr.min.js"]')) {
 
 ---
 
+### #32 ⭐ Trigger sized/shaped to match the Bubble HTML element (not a fixed 24px circle)
+
+**Problem:** trigger was hardcoded to `24px × 24px` with `border-radius:50%` — a fixed circle regardless of how the containing Bubble HTML element was sized or shaped. Requirement changed: the trigger should fill and match whatever size/shape the Bubble element itself is given (square, rounded-rect, any dimensions), fully controlled from the Bubble editor, not from this code.
+
+**Fix, step 1 — percentage sizing:** `.pickr-trigger-el` and `.pcr-button` changed from `24px` to `width:100%; height:100%`, and `border-radius:50%` removed from both. Added `html, body { width:100%; height:100%; margin:0; padding:0; }` since Bubble renders HTML elements inside an iframe, which doesn't fill its parent by size automatically.
+
+**Fix, step 2 — the actual bug this surfaced:** after step 1, the trigger rendered as a small rectangle in the corner instead of filling the element. Root cause: `Pickr.create()` replaces the original `.pickr-trigger-el` div in the DOM with its own wrapper (`<div class="pickr"><button class="pcr-button">`). That `.pickr` wrapper has no explicit size of its own (shrink-wraps to content), so `.pcr-button`'s `width:100%; height:100%` was resolving against the wrapper's auto size, not the full element. Fixed by forcing the wrapper itself: `.pickr { width:100% !important; height:100% !important; display:block !important; }`.
+
+**Why `24px` didn't have this problem:** an absolute pixel value doesn't depend on an ancestor having an explicit size, so it rendered fine regardless of the `.pickr` wrapper's auto-sizing. Percentage sizing exposed the wrapper as the missing link.
+
+**Also required in Bubble editor (not code-side):** the HTML element's **"Fit height to content"** property must stay **unchecked** — otherwise Bubble calculates the element's height from its content instead of the reverse, and the fill-parent CSS above has nothing stable to size against.
+
+**Net effect:** trigger's size and shape are now fully driven by the Bubble HTML element's own dimensions and corner-radius — no size/shape values left in this code to keep in sync per instance.
+
+---
+
 ### Housekeeping pass (no logic changes)
 - `dynamicPosition` variable removed — `'left-middle'` inlined directly into `Pickr.create()`
 - All Hindi inline comments replaced with English
@@ -176,6 +192,7 @@ if (!document.querySelector('script[src*="pickr.min.js"]')) {
 | `safeBubbleSend` drops payload silently if bridge not ready | Race window is too small to hit in practice — user can't open the picker before `bubble_fn_colorData` is ready. Guard prevents a crash; no retry needed. |
 | `position: 'left-middle'` hardcoded | `autoReposition: true` handles viewport edge cases. At worst a cosmetic flash. |
 | Explicit `pickr.hide()` after `runCancel()` in CANCEL handler | No double-fire currently. CDN pinning mitigates forward-compat risk if Pickr's event semantics change. |
+| `.pickr` wrapper forced to `100% !important` globally (Fix #32) | Applies to all 10-15 instances via one shared class, but each instance's `.pickr` wrapper sits inside its own distinct Bubble HTML element, so `100%` resolves per-instance correctly. `!important` needed to beat Pickr's own default styling on that wrapper. |
 
 ---
 
@@ -200,3 +217,7 @@ if (!document.querySelector('script[src*="pickr.min.js"]')) {
 - [ ] Force multiple Reusable Element re-renders in a row — confirm script count stays at `1` each time (Fix #31)
 - [ ] Confirm popup opens correctly across all 10–15 instances after this change (Fix #31)
 - [ ] Retest the original detach-while-open scenario (Fix #26/#30) now that load timing has changed (Fix #31)
+- [x] Trigger fills its Bubble HTML element (size + shape) instead of showing as a small rectangle — verified fix after correcting `.pickr` wrapper sizing (Fix #32)
+- [ ] Confirm trigger fill works across all 10–15 instances at different Bubble element sizes/shapes (square, rounded-rect, etc.) (Fix #32)
+- [ ] Confirm "Fit height to content" stays unchecked on every instance's Bubble HTML element — re-check after any editor changes (Fix #32)
+- [ ] Resize the Bubble HTML element after page load (if dynamically resizable) — confirm trigger resizes with it, not just on initial render (Fix #32)
