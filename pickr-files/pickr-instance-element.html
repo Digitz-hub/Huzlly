@@ -101,8 +101,9 @@
 }
 
 </style>
-<script src="https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/pickr.min.js"></script>
+<!-- pickr.min.js is loaded once, page-wide, via Head Code (Settings → SEO/metatags → header script). Do not re-add a per-instance <script src> for the library here. -->
 <script>
+
 (function() {
 
   // Fix #27: global debug flag — gates console.warn noise in production.
@@ -121,6 +122,18 @@
 
   var instanceKey = 'pickr_' + fieldName;
 
+  // Fix #30: generation counter — invalidates any pending Pickr-load retry left over
+  // from a PREVIOUS execution of this same instance's script. Each instance loads its
+  // own copy of pickr.min.js, so if Bubble re-renders this element while an earlier
+  // execution is still polling for Pickr to finish loading, that earlier retry is now
+  // orphaned — it's holding a triggerEl reference to a DOM node this new render already
+  // removed. Without this guard, the orphaned retry eventually resolves and calls
+  // Pickr.create() against a detached node, and Pickr's own mount code
+  // (opt.el.parentNode.replaceChild(...)) throws because parentNode is null.
+  window.__pickrGen = window.__pickrGen || {};
+  window.__pickrGen[instanceKey] = (window.__pickrGen[instanceKey] || 0) + 1;
+  var myGen = window.__pickrGen[instanceKey];
+
   // Fix #29: div stays generic in markup — fieldName is the single source of truth.
   // At parse time: grab the first unclaimed div, stamp data-field from fieldName,
   // then mark it claimed. Re-query by identity so all subsequent lookups (including
@@ -135,6 +148,11 @@
   function initPickrInstance() {
     if(typeof Pickr === 'undefined') return setTimeout(initPickrInstance, 100);
 
+    // Fix #30: a newer execution of this same instance's script has started since
+    // this retry loop began (window.__pickrGen bumped) — this one is stale. Bail
+    // instead of mounting on an element that render may have already removed.
+    if (window.__pickrGen[instanceKey] !== myGen) return;
+
     if (!triggerEl) {
       if (window.PICKR_DEBUG) {
         console.warn('Pickr (' + fieldName + '): no unclaimed .pickr-trigger-el found - check instance count / re-render order.');
@@ -146,6 +164,22 @@
       // side without needing PICKR_DEBUG flipped on in the browser console.
       if (typeof bubble_fn_colorData === 'function') {
         bubble_fn_colorData(JSON.stringify({ field: fieldName, value: null, saved: false, error: 'no_trigger_found' }));
+      }
+      return;
+    }
+
+    // Fix #30: triggerEl was found earlier (at parse time), but may have been
+    // detached from the DOM since then — e.g. a re-render replaced it while this
+    // instance was still waiting on Pickr to load. Pickr.create() has no null-check
+    // of its own here and will throw a raw TypeError trying to mount on a detached
+    // node (opt.el.parentNode.replaceChild(...) — parentNode is null). Check first
+    // and bail cleanly instead.
+    if (!triggerEl.isConnected) {
+      if (window.PICKR_DEBUG) {
+        console.warn('Pickr (' + fieldName + '): trigger element was detached before mount, aborting stale init.');
+      }
+      if (typeof bubble_fn_colorData === 'function') {
+        bubble_fn_colorData(JSON.stringify({ field: fieldName, value: null, saved: false, error: 'trigger_detached' }));
       }
       return;
     }
