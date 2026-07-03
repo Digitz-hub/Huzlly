@@ -4,9 +4,7 @@ A lightweight, customizable color picker built with the [Pickr](https://github.c
 
 **UX model:** the picker **auto-saves when closed** (clicking outside, or pressing Escape with no explicit cancel). A **CANCEL** button is available inside the popup if the user wants to discard their changes and revert to the last saved color instead.
 
-> **Latest update (June 26, 2026):** internal JS robustness fixes only (trigger-claim timing, guarded Bubble bridge calls, listener/timer cleanup on destroy, null-safe color locking, pinned Pickr CDN version, debug-gated console warnings). **No change to Bubble-side setup** — workflows, regex patterns, and JS-to-Bubble config below are still accurate. See `pickr-snapshot.md` for full details.
-
-The full code (`pickr-instance-element.html`) and session notes (`pickr-bubble-snapshot.md`) are available in this repository: **[GitHub link — coming soon]**
+The full code (`pickr-instance-element.html`), the library loader (`pickr-library-loader.html`), and session notes (`pickr-snapshot.md`) are available in this repository: **[GitHub link — coming soon]**
 
 ---
 
@@ -16,7 +14,29 @@ The full code (`pickr-instance-element.html`) and session notes (`pickr-bubble-s
 
 ---
 
-## Step 1 — Add the HTML Element and Create a Custom State
+## Step 1 — Add the Pickr Library Loader (once per page)
+
+Before adding any color picker instances, add **one** standard **HTML** element inside the Reusable Element. You can name it whatever you like — it's separate from the 10–15 per-field trigger elements you'll add in Step 2, and it only needs to exist **once** for the whole Reusable Element, not once per instance.
+
+Paste the full code from `pickr-library-loader.html` into this element's content field:
+
+```html
+<script>
+if (!document.querySelector('script[src*="pickr.min.js"]')) {
+  var s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/pickr.min.js';
+  document.head.appendChild(s);
+}
+</script>
+```
+
+**Why this is needed:** each per-instance element used to load its own copy of `pickr.min.js`, meaning 10–15 concurrent loads on a page with that many instances. This loader loads the library exactly once and lets every instance share it. The `querySelector` check guards against duplicate loads if the Reusable Element itself re-renders.
+
+**Where to place it:** anywhere inside the Reusable Element — position doesn't matter, since it only injects a `<script>` tag into `<head>` and has no visible output.
+
+---
+
+## Step 2 — Add the HTML Element and Create a Custom State
 
 Add a standard **HTML** element to your Bubble page where you want the color picker trigger circle to appear.
 
@@ -34,7 +54,7 @@ The code reads `rawColor` (the current saved color) as a dynamic value from this
 
 ---
 
-## Step 2 — Paste the Code
+## Step 3 — Paste the Code
 
 Copy the full code from `pickr-instance-element.html` in this repository and paste it into the HTML element's content field in Bubble.
 
@@ -66,7 +86,7 @@ Use a clear, descriptive name with no spaces. Examples:
 
 ---
 
-## Step 3 — Add the JavascripttoBubble Element
+## Step 4 — Add the JavascripttoBubble Element
 
 From the Toolbox plugin, add a **JavascripttoBubble** element anywhere on the page. You only need **one** — it handles all color picker instances on the page.
 
@@ -112,7 +132,7 @@ Use Bubble's `extract with Regex` operator (`:first item`) to pull individual va
 
 ---
 
-## Step 4 — Set Up Bubble Workflows
+## Step 5 — Set Up Bubble Workflows
 
 All color picker instances share a **single workflow trigger**:
 
@@ -154,8 +174,6 @@ This action only fires when the popup is **auto-saved on close** (`saved: true`)
 **Why the `saved: true` condition?**
 If `colorHex` updated on every drag or cancel, Bubble would re-render the HTML element — destroying the Pickr instance and closing the popup mid-use. Restricting this to `saved: true` keeps the popup stable during live preview, and ensures a CANCEL/Escape revert payload (`saved: false`) never accidentally overwrites the last confirmed saved colour.
 
-> **No change needed if migrating from the old SAVE-button version** — this action's condition was already `saved: true`. Only the *trigger* for that payload moved (from a button click to a normal popup close); the Bubble-side condition stays identical.
-
 ---
 
 ### Adding more instances
@@ -170,12 +188,13 @@ You can add as many color picker instances to the same page as you need — each
 
 **Important:** Keep the number of simultaneously **visible** color picker instances to **4–5 at most**. Beyond that, Bubble may struggle to handle multiple Pickr instances rendering at the same time, which can cause pickers to break or behave unexpectedly. If you have more than 5 color pickers on a page, consider showing them in separate groups or sections so only a few are visible at any given time.
 
-A single JavascripttoBubble element (`colorData`) handles all instances — you do not need to add more than one.
+A single JavascripttoBubble element (`colorData`) handles all instances — you do not need to add more than one. Likewise, the Step 1 library loader element only needs to exist **once** for the whole Reusable Element — do not duplicate it per instance.
 
 **Summary for each new instance:**
 - Add a new HTML element (24×24px)
 - Create a `colorHex` custom state on it (type: text)
-- Paste the full code
+- Paste the full code from `pickr-instance-element.html`
 - Set `rawColor` to `This HTMLElement's colorHex`
 - Set a unique `fieldName` string
 - Everything else in the code stays identical
+- Do **not** add another library loader element — the one from Step 1 already covers every instance
