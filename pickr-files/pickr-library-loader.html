@@ -1,0 +1,23 @@
+<!--
+  PICKR LIBRARY LOADER — place this ONCE inside the Reusable Element,
+  separate from the 10-15 per-field trigger/instance elements.
+
+  Fix #31: loads pickr.min.js a single time instead of once per instance
+  (previously 10-15 concurrent loads, one per duplicated instance element).
+
+  Dedup guard is required here (unlike a true page-level Head Code
+  injection) because this lives inside a Reusable Element that can itself
+  re-render. Without the querySelector check, every re-render would insert
+  another copy of the library and recreate the original multi-load problem.
+
+  Fix #30 (generation counter + isConnected guard, in each per-instance
+  script) stays in place regardless — it still covers the residual race
+  window during this one load, and any future re-render-during-load case.
+-->
+<script>
+if (!document.querySelector('script[src*="pickr.min.js"]')) {
+  var s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/@simonwep/pickr@1.9.1/dist/pickr.min.js';
+  document.head.appendChild(s);
+}
+</script>
