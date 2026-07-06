@@ -18,6 +18,14 @@
   const pendingTimeoutForIndex = {};
   const SETTLE_DELAY_MS = 50;
 
+  // Tracks, per row index, whether an input/textarea/select living INSIDE
+  // that row's menu (e.g. an "Insert Link" URL field) currently holds real
+  // DOM focus. While true, updateMenuForIndex() must not hide the menu just
+  // because editor.isFocused is false — that's expected and correct at that
+  // moment, since focus has legitimately moved off the editor and onto the
+  // menu's own input.
+  const inputFocusedForIndex = {};
+
   function scheduleUpdateMenuForIndex(index) {
     if (pendingTimeoutForIndex[index]) clearTimeout(pendingTimeoutForIndex[index]);
     pendingTimeoutForIndex[index] = setTimeout(() => {
@@ -65,6 +73,14 @@
     const editor = editorsByIndex[index];
     const menuEl = document.getElementById(MENU_ID_PREFIX + index);
     if (!editor || !menuEl) return;
+
+    // While the user is actively focused inside this row's menu input (e.g.
+    // typing a link URL), leave the menu exactly as it is. editor.isFocused
+    // is false right now on purpose (focus really did move to the input) —
+    // that must NOT be treated as "user clicked away". Position doesn't need
+    // to change either, since the underlying selection isn't changing while
+    // they type into the input.
+    if (inputFocusedForIndex[index]) return;
 
     // Gate on real editor focus. ProseMirror does NOT clear its internal
     // selection just because DOM focus moves elsewhere, so without this a
@@ -136,7 +152,7 @@
         // the menu itself (a button click), in which case leave it alone so
         // the click's own workflow gets to run.
         editor.on('blur', () => {
-          if (mousedownWasInsideMenu) return;
+          if (mousedownWasInsideMenu || inputFocusedForIndex[index]) return;
 
           // Cancel any selectionUpdate/transaction-triggered timer already
           // queued for this row before the blur happened. Without this,
@@ -193,7 +209,20 @@
       const menuEl = document.getElementById(MENU_ID_PREFIX + index);
       if (menuEl && menuEl.contains(e.target)) {
         mousedownWasInsideMenu = true;
-        e.preventDefault(); // keep editor focused, don't let it blur
+
+        // Buttons (Bold/Italic/etc.) still get preventDefault so the editor
+        // never blurs for those clicks. Real form controls (an "Insert
+        // Link" URL input, for example) are excluded on purpose:
+        // preventDefault() on mousedown blocks the browser's default
+        // "focus this element" action entirely, which would make the input
+        // permanently unfocusable/untypeable. Those need genuine DOM focus
+        // to work, so we let the click proceed normally for them.
+        const isRealFormControl = e.target.closest(
+          'input, textarea, select, [contenteditable], [data-allow-focus]'
+        );
+        if (!isRealFormControl) {
+          e.preventDefault(); // keep editor focused, don't let it blur
+        }
       }
     });
 
@@ -211,6 +240,52 @@
       }
     });
   }, true);
+
+  // Tracks real DOM focus entering/leaving a menu's own input field (e.g.
+  // the "Insert Link" URL box). This is what lets the isFocused-based hide
+  // logic above (updateMenuForIndex, editor's 'blur' handler) correctly
+  // distinguish "user is typing in my own menu's input" from "user clicked
+  // away from this row entirely".
+  document.addEventListener(
+    'focusin',
+    (e) => {
+      Object.keys(editorsByIndex).forEach((index) => {
+        const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+        if (
+          menuEl &&
+          menuEl.contains(e.target) &&
+          e.target.closest('input, textarea, select, [contenteditable], [data-allow-focus]')
+        ) {
+          inputFocusedForIndex[index] = true;
+        }
+      });
+    },
+    true
+  );
+
+  document.addEventListener(
+    'focusout',
+    (e) => {
+      Object.keys(editorsByIndex).forEach((index) => {
+        const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+        if (!menuEl || !menuEl.contains(e.target)) return;
+
+        // relatedTarget is where focus is headed. If it's still somewhere
+        // inside this same menu (e.g. tabbing from the URL input to a "Go"
+        // button), keep the lock on — don't release it mid-interaction.
+        const goingTo = e.relatedTarget;
+        if (goingTo && menuEl.contains(goingTo)) return;
+
+        inputFocusedForIndex[index] = false;
+
+        // Focus has genuinely left the menu's input now. Re-evaluate: hide
+        // if the editor isn't focused either (user clicked away entirely),
+        // or reposition correctly if the editor still is.
+        updateMenuForIndex(index);
+      });
+    },
+    true
+  );
 
   const observer = new MutationObserver(() => tryAttachAll());
   observer.observe(document.body, { childList: true, subtree: true });
