@@ -1,0 +1,295 @@
+<script>
+(function () {
+  const WRAPPER_ID_PREFIX = 'tiptap-proposal-'; // <-- CHANGE
+  const MENU_ID_PREFIX = 'table-menu-tiptap-proposal-'; // <-- CHANGE
+
+  const editorsByIndex = {};
+  const listenersAttachedForIndex = new Set();
+
+  function getEditorFromWrapper(wrapperEl) {
+    const mountPoint = wrapperEl.querySelector('[id^="tiptapEditor-"]');
+    if (!mountPoint) return null;
+    const proseMirrorEl = mountPoint.querySelector('.ProseMirror');
+    if (!proseMirrorEl) return null;
+    return proseMirrorEl.editor || null;
+  }
+
+  // Returns the <td>/<th> element the menu should anchor to, or null if the
+  // current selection isn't inside a table at all (in which case the menu
+  // should be hidden). This single function doubles as the "are we in a
+  // table" check — no separate boolean needed.
+  //
+  // Covers all three cases you asked for:
+  //   - whole table selected      -> CellSelection spanning every cell
+  //   - a row / column selected   -> CellSelection spanning that row/column
+  //   - cursor just sitting in a cell -> plain TextSelection / GapCursor
+  //
+  // prosemirror-tables implements ALL cell/row/column/whole-table selections
+  // as the same CellSelection class (jsonID "cell") — there's no separate
+  // "table selected" selection type. Checking toJSON().type === 'cell' is
+  // the same technique the bubble-menu script already uses for 'text'.
+  function getActiveCellElement(editor) {
+    const { selection } = editor.state;
+    const { view } = editor;
+    const selectionType = selection.toJSON ? selection.toJSON().type : null;
+
+    // If the user has highlighted actual text inside a cell (not just parked
+    // their cursor there), that's the bubble menu's job, not the table
+    // menu's — hide this one.
+    if (selectionType === 'text' && !selection.empty) return null;
+
+    if (selectionType === 'cell' && selection.$anchorCell) {
+      // CellSelection: anchor to the cell where the drag/selection started.
+      //
+      // CHANGE (fix): $anchorCell.pos points to the position right BEFORE
+      // the cell node itself (a node boundary), not to content inside it.
+      // view.domAtPos() is ambiguous at boundary positions like this - it
+      // frequently resolves to the PARENT <tr> (with an offset) instead of
+      // the <td>/<th>. Walking up parentNode from a <tr> never finds a
+      // td/th ancestor (cells are <tr>'s children, not its ancestors), so
+      // the old domAtPos-based approach silently returned null for every
+      // row/column/whole-table selection - the menu just never showed for
+      // those cases, even though plain single-cursor-in-a-cell worked fine.
+      //
+      // view.nodeDOM(pos) is the correct tool for a position that points
+      // BEFORE a node: it returns that node's own DOM element directly, no
+      // domAtPos ambiguity involved.
+      const cellDom = view.nodeDOM(selection.$anchorCell.pos);
+      // closest() checks the element itself first, then ancestors - covers
+      // both the normal case (cellDom IS the td/th) and the case where a
+      // custom NodeView wraps it in an extra element.
+      return cellDom && cellDom.nodeType === 1 ? cellDom.closest('td, th') : null;
+    }
+
+    // Plain cursor case: anchor to wherever the cursor actually is.
+    // Here the position is inside the cell's content, so domAtPos() resolves
+    // reliably and walking up to the nearest Element then closest('td, th')
+    // works as expected.
+    let node = view.domAtPos(selection.$from.pos).node;
+    while (node && node.nodeType !== 1) node = node.parentNode; // walk up to an Element
+    // If we're not inside a table at all, there's no td/th ancestor, so this
+    // correctly returns null and the menu stays hidden.
+    return node ? node.closest('td, th') : null;
+  }
+
+  // If any ancestor of the menu has a CSS transform (common with Bubble's
+  // animated/conditional groups), that ancestor becomes the containing block
+  // for position:fixed descendants — meaning fixed coordinates are calculated
+  // relative to that ancestor's box, not the real viewport. Rather than moving
+  // the menu element (which would break Bubble's Repeating Group data context),
+  // we find that ancestor and subtract its offset from our target coordinates.
+  function getFixedContainingBlockOffset(el) {
+    let ancestor = el.parentElement;
+    while (ancestor && ancestor !== document.body) {
+      const t = getComputedStyle(ancestor).transform;
+      if (t && t !== 'none') {
+        const r = ancestor.getBoundingClientRect();
+        return { left: r.left, top: r.top };
+      }
+      ancestor = ancestor.parentElement;
+    }
+    return { left: 0, top: 0 };
+  }
+
+  function positionMenu(menuEl, cellEl) {
+    const cellRect = cellEl.getBoundingClientRect();
+    const menuWidth = menuEl.offsetWidth;
+    const menuHeight = menuEl.offsetHeight;
+
+    // Anchored to the START of the cell (left edge) by default.
+    // For centered instead, swap this line for:
+    //   let left = cellRect.left + (cellRect.width / 2) - (menuWidth / 2);
+    let left = cellRect.left;
+    const minX = 8;
+    const maxX = window.innerWidth - 8;
+    if (left < minX) left = minX;
+    if (left + menuWidth > maxX) left = maxX - menuWidth;
+
+    // Sits 8px below the cell by default, flips above if no room at the
+    // bottom of the viewport.
+    let top = cellRect.bottom + 8;
+    if (top + menuHeight > window.innerHeight - 8) top = cellRect.top - menuHeight - 8;
+
+    // Correct for any transformed ancestor of the menu element itself —
+    // see getFixedContainingBlockOffset() above.
+    const offset = getFixedContainingBlockOffset(menuEl);
+    left -= offset.left;
+    top -= offset.top;
+
+    menuEl.style.left = `${left}px`;
+    menuEl.style.top = `${top}px`;
+    menuEl.style.transform = 'none';
+  }
+
+  // When a blurred editor regains focus, the browser can momentarily
+  // restore the PREVIOUS selection before the click resolves to its actual
+  // new position — firing a transaction/selectionUpdate with the old
+  // (previous-cell) selection, followed shortly after by another one with
+  // the real new position. These two events are NOT guaranteed to land in
+  // the same animation frame (a normal mousedown-to-mouseup click gesture
+  // can span more than one), so a single requestAnimationFrame isn't
+  // enough to collapse them — it can paint the stale/old position on one
+  // frame before the corrected one arrives a frame later, causing a visible
+  // flash. Using a resettable short timer instead means any burst of
+  // events, however many frames it spans, only actually updates the menu
+  // once the selection has stopped changing for SETTLE_DELAY_MS.
+  const pendingTimeoutForIndex = {};
+  const SETTLE_DELAY_MS = 50;
+
+  function scheduleUpdateMenuForIndex(index) {
+    if (pendingTimeoutForIndex[index]) clearTimeout(pendingTimeoutForIndex[index]);
+    pendingTimeoutForIndex[index] = setTimeout(() => {
+      pendingTimeoutForIndex[index] = null;
+      updateMenuForIndex(index);
+    }, SETTLE_DELAY_MS);
+  }
+
+  function updateMenuForIndex(index) {
+    const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+    if (!menuEl) return;
+
+    // Resolve to a definite display state on every call, including the case
+    // where the editor hasn't loaded yet — that's what keeps the menu from
+    // sitting at Bubble's default (visible) display before anything real
+    // has happened.
+    // editor.isFocused is required here, not just optional extra safety:
+    // scroll/resize listeners below call this function directly, with no
+    // focus check of their own, and ProseMirror's selection does not clear
+    // when an editor blurs. Without this check, scrolling the page after
+    // clicking away from a table cell would re-show that row's menu based
+    // on its stale (pre-blur) selection.
+    const editor = editorsByIndex[index];
+    const cellEl = editor && editor.isFocused ? getActiveCellElement(editor) : null;
+
+    if (!cellEl) {
+      menuEl.style.display = 'none';
+      return;
+    }
+
+    menuEl.style.position = 'fixed';
+    menuEl.style.zIndex = '9999';
+    menuEl.style.display = 'flex';
+    positionMenu(menuEl, cellEl);
+  }
+
+  // Tracks whether the mousedown that's currently in progress landed inside
+  // any table menu. Read by the 'blur' handler below — a menu button click
+  // blurs the editor a moment before its own Bubble workflow runs, and we
+  // don't want that transient blur to hide the very menu being clicked.
+  let mousedownWasInsideMenu = false;
+
+  function tryAttachAll() {
+    document.querySelectorAll(`[id^="${WRAPPER_ID_PREFIX}"]`).forEach((wrapperEl) => {
+      const index = wrapperEl.id.replace(WRAPPER_ID_PREFIX, '');
+
+      const freshEditor = getEditorFromWrapper(wrapperEl);
+      if (freshEditor) editorsByIndex[index] = freshEditor;
+
+      const editor = editorsByIndex[index];
+      if (!editor) return;
+
+      if (!listenersAttachedForIndex.has(index)) {
+        editor.on('selectionUpdate', () => scheduleUpdateMenuForIndex(index));
+        editor.on('transaction', () => scheduleUpdateMenuForIndex(index));
+
+        // Deliberately NOT calling updateMenuForIndex() on 'focus' itself.
+        // When you click back into the editor at a new spot, 'focus' fires
+        // before ProseMirror has finished resolving the click to its new
+        // selection — so checking right then reads the OLD (pre-click)
+        // selection, which could still say "in table," showing the menu for
+        // an instant before the real selectionUpdate/transaction fires a
+        // moment later with the correct position and hides it again (a
+        // visible flash). selectionUpdate/transaction already fire right
+        // after focus with the settled position, so nothing is lost by
+        // skipping the focus-triggered check.
+
+        // Direct focus-based hide: as soon as this row's editor loses focus,
+        // hide its menu — unless the mousedown causing this blur landed on
+        // the menu itself (a button click), in which case leave it alone so
+        // the click's own workflow gets to run.
+        editor.on('blur', () => {
+          if (mousedownWasInsideMenu) return;
+
+          // Cancel any selectionUpdate/transaction-triggered rAF that was
+          // already queued for this row before the blur happened. Without
+          // this, that stale callback still fires on the next repaint,
+          // reads the selection (which does NOT clear itself on blur), and
+          // re-shows the menu we just hid — causing a visible flash-back
+          // right after clicking away.
+          if (pendingTimeoutForIndex[index]) {
+            clearTimeout(pendingTimeoutForIndex[index]);
+            pendingTimeoutForIndex[index] = null;
+          }
+
+          const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+          if (menuEl) menuEl.style.display = 'none';
+        });
+
+        window.addEventListener('scroll', () => updateMenuForIndex(index), true);
+        window.addEventListener('resize', () => updateMenuForIndex(index), true);
+        listenersAttachedForIndex.add(index);
+
+        // Set initial display state ONCE, right when we first attach.
+        // After this, display is driven only by real editor events and the
+        // outside-click handler below — NOT by every later tryAttachAll()
+        // scan. tryAttachAll() reruns on any DOM mutation anywhere on the
+        // page (very frequent on a live Bubble page). Selection doesn't
+        // clear itself when the editor blurs, so recomputing on every one
+        // of those incidental scans would re-show a menu you just dismissed
+        // by clicking outside, since the stale selection still points
+        // inside the table.
+        updateMenuForIndex(index);
+      }
+    });
+  }
+
+  // Same outside-click hide as the other two menus, PLUS: records whether
+  // this mousedown landed inside any menu (read by the 'blur' handlers
+  // above). This runs in the capture phase, which fires before the browser's
+  // internal focus-change/blur dispatch for this same click — so the flag is
+  // set correctly before blur checks it.
+  //
+  // CHANGE (fix): also calls e.preventDefault() when the mousedown landed
+  // inside a menu. This stops the browser from ever shifting focus away
+  // from the editor in the first place, so no 'blur' event fires at all for
+  // menu-button clicks. Without this, focus visibly moves off the
+  // contenteditable a moment before the button's own Bubble workflow runs —
+  // and since that workflow's table-command plugin action targets "the
+  // currently focused editor," losing focus can make the command silently
+  // no-op even though the menu itself was correctly kept visible by the
+  // mousedownWasInsideMenu flag below. preventDefault() on mousedown does
+  // NOT block the subsequent click/mouseup, so the button's workflow still
+  // fires normally — it only blocks the focus-shift default action.
+  document.addEventListener('mousedown', (e) => {
+    mousedownWasInsideMenu = false;
+    Object.keys(editorsByIndex).forEach((index) => {
+      const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+      if (menuEl && menuEl.contains(e.target)) {
+        mousedownWasInsideMenu = true;
+        e.preventDefault(); // <-- CHANGE: keep editor focused, don't let it blur
+      }
+    });
+
+    Object.keys(editorsByIndex).forEach((index) => {
+      const editor = editorsByIndex[index];
+      const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+      if (!editor || !menuEl) return;
+
+      const wrapperEl = document.getElementById(WRAPPER_ID_PREFIX + index);
+      const clickedInsideMenu = menuEl.contains(e.target);
+      const clickedInsideEditor = wrapperEl && wrapperEl.contains(e.target);
+
+      if (!clickedInsideMenu && !clickedInsideEditor) {
+        menuEl.style.display = 'none';
+      }
+    });
+  }, true);
+
+  const observer = new MutationObserver(() => tryAttachAll());
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  tryAttachAll();
+  setTimeout(tryAttachAll, 1000); // <-- CHANGE (optional)
+  setTimeout(tryAttachAll, 3000);
+})();
+</script>
