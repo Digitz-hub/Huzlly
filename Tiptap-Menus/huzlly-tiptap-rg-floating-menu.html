@@ -1,0 +1,220 @@
+<script>
+(function () {
+  const WRAPPER_ID_PREFIX = 'tiptap-proposal-'; // <-- CHANGE
+  const MENU_ID_PREFIX = 'floating-menu-tiptap-proposal-'; // <-- CHANGE
+
+  const editorsByIndex = {};
+  const listenersAttachedForIndex = new Set();
+  // Tracks which row's editor was most recently focused. Set only via an
+  // explicit 'focus' event — NOT read reactively inside the show/hide check —
+  // so a transient blur caused by clicking a menu button (mousedown moves
+  // focus away from the editor before the button's workflow runs) never
+  // causes a premature hide mid-click.
+  let currentlyFocusedIndex = null;
+
+  // A blurred editor regaining focus can cause the browser to momentarily
+  // restore the PREVIOUS selection before the click resolves to its actual
+  // new position — and this script calls updateMenuForIndex() directly from
+  // 'focus', 'selectionUpdate', 'transaction', AND from every MutationObserver
+  // rescan in tryAttachAll(). Any one of those can land in that brief stale-
+  // selection window and paint the menu at the wrong (previous) position for
+  // a frame before the corrected event arrives. Routing every call through
+  // this resettable timer instead means only the settled state — after
+  // SETTLE_DELAY_MS of no further updates — ever actually paints.
+  const pendingTimeoutForIndex = {};
+  const SETTLE_DELAY_MS = 50;
+
+  function scheduleUpdateMenuForIndex(index) {
+    if (pendingTimeoutForIndex[index]) clearTimeout(pendingTimeoutForIndex[index]);
+    pendingTimeoutForIndex[index] = setTimeout(() => {
+      pendingTimeoutForIndex[index] = null;
+      updateMenuForIndex(index);
+    }, SETTLE_DELAY_MS);
+  }
+
+  function getEditorFromWrapper(wrapperEl) {
+    const mountPoint = wrapperEl.querySelector('[id^="tiptapEditor-"]');
+    if (!mountPoint) return null;
+    const proseMirrorEl = mountPoint.querySelector('.ProseMirror');
+    if (!proseMirrorEl) return null;
+    return proseMirrorEl.editor || null;
+  }
+
+  // Mirrors Tiptap's own FloatingMenu shouldShow logic, but restricted to
+  // top-level paragraphs only — NOT empty lines inside bullet/numbered lists,
+  // blockquotes, table cells, etc. Focus is gated separately via
+  // `currentlyFocusedIndex` (see updateMenuForIndex) rather than checked here,
+  // since checking it here would flicker-hide the menu mid-click.
+  function isCursorOnEmptyLine(editor) {
+    const { selection } = editor.state;
+    if (!selection.empty) return false;
+    const { $anchor } = selection;
+    const parent = $anchor.parent;
+    if (!parent.isTextblock) return false;
+    if (parent.type.spec.code) return false;
+    if (parent.textContent.length > 0) return false;
+    if (parent.type.name !== 'paragraph') return false;
+    // depth === 1 means this paragraph's direct parent is the doc itself —
+    // i.e. it's NOT nested inside a listItem, blockquote, tableCell, etc.
+    if ($anchor.depth !== 1) return false;
+    return true;
+  }
+
+  function positionMenu(menuEl, x, topY, bottomY) {
+    const menuWidth = menuEl.offsetWidth;
+    const menuHeight = menuEl.offsetHeight;
+    const minX = 8;
+    const maxX = window.innerWidth - 8;
+    // Floating menu is left-aligned to the cursor (no selection width to center on).
+    let left = x;
+    if (left < minX) left = minX;
+    if (left + menuWidth > maxX) left = maxX - menuWidth;
+
+    // Same vertical flip logic as the bubble menu: prefer above the line,
+    // flip below if there isn't room at the top of the viewport.
+    let top = topY - menuHeight - 8;
+    if (top < 8) top = bottomY + 8;
+
+    menuEl.style.left = `${left}px`;
+    menuEl.style.top = `${top}px`;
+    menuEl.style.margin = '0'; // reset Bubble's default group margin, if any
+    menuEl.style.transform = 'none';
+  }
+
+  // If any ancestor of the menu has a CSS transform (common with Bubble's
+  // animated/conditional groups), that ancestor becomes the containing block
+  // for position:fixed descendants — meaning fixed coordinates are calculated
+  // relative to that ancestor's box, not the real viewport. Rather than moving
+  // the menu element (which broke Bubble's Repeating Group data context — the
+  // row's workflows depend on the element staying inside its RG cell), we just
+  // find that ancestor and subtract its offset from our target coordinates.
+  function getFixedContainingBlockOffset(el) {
+    let ancestor = el.parentElement;
+    while (ancestor && ancestor !== document.body) {
+      const t = getComputedStyle(ancestor).transform;
+      if (t && t !== 'none') {
+        const r = ancestor.getBoundingClientRect();
+        return { left: r.left, top: r.top };
+      }
+      ancestor = ancestor.parentElement;
+    }
+    return { left: 0, top: 0 };
+  }
+
+  function updateMenuForIndex(index) {
+    const editor = editorsByIndex[index];
+    const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+    if (!editor || !menuEl) return;
+
+    // Only the row that was most recently explicitly focused is allowed to
+    // show its menu — prevents every row with an empty top-level paragraph
+    // from showing its menu at once (e.g. right after page load, before the
+    // user has clicked into any row).
+    if (index !== currentlyFocusedIndex) {
+      menuEl.style.display = 'none';
+      return;
+    }
+
+    if (!isCursorOnEmptyLine(editor)) {
+      menuEl.style.display = 'none';
+      return;
+    }
+
+    const { view } = editor;
+    const { from } = editor.state.selection;
+
+    // coordsAtPos() is unreliable on empty paragraphs — on an empty <p> with
+    // no visible content, browsers can report a collapsed rect belonging to
+    // the previous line/heading instead of the actual empty line. Walking to
+    // the real DOM element and reading its own bounding rect is reliable.
+    let node = view.domAtPos(from).node;
+    while (node.nodeType !== 1) node = node.parentNode; // walk up to an Element
+    const rect = node.getBoundingClientRect();
+    const offset = getFixedContainingBlockOffset(menuEl);
+
+    menuEl.style.position = 'fixed';
+    menuEl.style.zIndex = '9999';
+    menuEl.style.display = 'flex';
+    positionMenu(
+      menuEl,
+      rect.left - offset.left,
+      rect.top - offset.top,
+      rect.bottom - offset.top
+    );
+  }
+
+  function tryAttachAll() {
+    document.querySelectorAll(`[id^="${WRAPPER_ID_PREFIX}"]`).forEach((wrapperEl) => {
+      const index = wrapperEl.id.replace(WRAPPER_ID_PREFIX, '');
+
+      const freshEditor = getEditorFromWrapper(wrapperEl);
+      if (freshEditor) editorsByIndex[index] = freshEditor;
+
+      const editor = editorsByIndex[index];
+      if (!editor) return;
+
+      if (!listenersAttachedForIndex.has(index)) {
+        // selectionUpdate: cursor moved to/from an empty line.
+        // transaction: covers typing — as soon as a char lands, textContent.length > 0
+        // and the menu hides on its own, no separate "hide on input" logic needed.
+        // focus: explicitly marks this row as the active one — the only place
+        // currentlyFocusedIndex is ever set. Deliberately no 'blur' listener —
+        // see the note on currentlyFocusedIndex above.
+        editor.on('focus', () => {
+          currentlyFocusedIndex = index;
+          scheduleUpdateMenuForIndex(index);
+        });
+        editor.on('selectionUpdate', () => scheduleUpdateMenuForIndex(index));
+        editor.on('transaction', () => scheduleUpdateMenuForIndex(index));
+        window.addEventListener('scroll', () => scheduleUpdateMenuForIndex(index), true);
+        window.addEventListener('resize', () => scheduleUpdateMenuForIndex(index), true);
+        listenersAttachedForIndex.add(index);
+      }
+
+      // Set correct initial state right away — otherwise the menu keeps
+      // whatever display Bubble gave it by default (visible) until the user
+      // actually clicks into the editor and triggers the first event.
+      // Routed through the debounce (not called directly) so a rescan that
+      // happens to land during the brief stale-selection window right after
+      // a focus regain doesn't paint the wrong position.
+      scheduleUpdateMenuForIndex(index);
+    });
+  }
+
+  // Deliberately NOT using focus/blur to hide the menu — clicking a menu button
+  // blurs the editor before its Bubble workflow runs, which would hide the menu
+  // mid-click (same bug already fixed in the bubble-menu version).
+  document.addEventListener('mousedown', (e) => {
+    Object.keys(editorsByIndex).forEach((index) => {
+      const editor = editorsByIndex[index];
+      const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+      if (!editor || !menuEl) return;
+
+      const wrapperEl = document.getElementById(WRAPPER_ID_PREFIX + index);
+      const clickedInsideMenu = menuEl.contains(e.target);
+      const clickedInsideEditor = wrapperEl && wrapperEl.contains(e.target);
+
+      if (!clickedInsideMenu && !clickedInsideEditor) {
+        if (pendingTimeoutForIndex[index]) {
+          clearTimeout(pendingTimeoutForIndex[index]);
+          pendingTimeoutForIndex[index] = null;
+        }
+        menuEl.style.display = 'none';
+        // Without this, currentlyFocusedIndex still points at this row, so a
+        // later MutationObserver-triggered tryAttachAll() scan calls
+        // updateMenuForIndex() again, sees index === currentlyFocusedIndex
+        // still true, and re-shows the menu even though focus is truly gone —
+        // requiring multiple outside clicks to actually make it stay hidden.
+        if (currentlyFocusedIndex === index) currentlyFocusedIndex = null;
+      }
+    });
+  }, true);
+
+  const observer = new MutationObserver(() => tryAttachAll());
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  tryAttachAll();
+  setTimeout(tryAttachAll, 1000); // <-- CHANGE (optional)
+  setTimeout(tryAttachAll, 3000);
+})();
+</script>

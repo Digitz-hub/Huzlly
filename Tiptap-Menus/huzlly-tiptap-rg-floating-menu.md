@@ -1,0 +1,289 @@
+# Huzlly — Custom Tiptap Floating Menu inside Repeating Group
+
+## Problem this solves
+Same root problem as the bubble-menu script: Tiptap's native **Floating Menu** plugin
+mechanism relies on `document.getElementById(id)` to find the menu element. Inside a
+**Repeating Group**, every row's menu shares the same static ID, so
+`getElementById()` only ever finds the first row's menu — floating menu only works
+correctly on row 0.
+
+This script bypasses that entirely. It talks directly to each row's raw Tiptap
+`Editor` instance and shows/hides/positions a **custom menu element** based on real
+editor state (cursor position + focus), so it works correctly for every row.
+
+**What "floating menu" means here:** unlike the bubble menu (which appears when text
+is *selected*), this menu appears automatically when the cursor is sitting on an
+**empty line** (no selection needed) — for inserting things like tables, headings,
+lists, dividers. It disappears the instant the line has any content.
+
+**Important:** This script does NOT apply any formatting itself. Formatting is
+applied entirely by your existing Bubble workflows attached to each menu button. This
+script's only job is: show the menu, hide the menu, position the menu correctly.
+
+---
+
+## How it finds the editor instance for each row
+Identical mechanism to the bubble-menu script:
+
+```
+wrapper (your ID Attribute, e.g. tiptap-proposal-0)
+  → find child whose id starts with "tiptapEditor-"
+    → find its child with class "ProseMirror"
+      → .editor  ← the real Tiptap Editor instance
+```
+
+This logic lives in `getEditorFromWrapper()`.
+
+---
+
+## Show / hide logic — `isCursorOnEmptyLine()` + `currentlyFocusedIndex`
+
+The menu shows only when **all** of these are true:
+
+1. **This row is the currently focused one** — tracked via a separate
+   `currentlyFocusedIndex` variable, set **only** inside an explicit
+   `editor.on('focus', ...)` listener. This is deliberately NOT read as
+   `editor.isFocused` inside the reactive show/hide check — see the important
+   note below on why.
+2. `selection.empty` — cursor is collapsed, not a text selection (that's the bubble
+   menu's job, not this one).
+3. `parent.isTextblock` and `!parent.type.spec.code` — cursor is in a normal textblock,
+   not inside a code block.
+4. `parent.textContent.length === 0` — the current line has **no text** yet.
+5. `parent.type.name === 'paragraph'` — must specifically be a paragraph node, not a
+   heading, list item, etc.
+6. `$anchor.depth === 1` — the paragraph's direct parent is the **document itself**.
+   This is what restricts the menu to **top-level empty lines only** — an empty line
+   inside a bullet list, numbered list, blockquote, or table cell will NOT trigger it,
+   because those paragraphs sit deeper than depth 1.
+
+Checks 2–6 live in `isCursorOnEmptyLine()`. Check 1 lives separately in
+`updateMenuForIndex()`, gating on `currentlyFocusedIndex` before even calling
+`isCursorOnEmptyLine()`.
+
+**Why focus-checking is split out like this:** an earlier version checked
+`editor.isFocused` directly inside `isCursorOnEmptyLine()`, reactively, on every
+`selectionUpdate`/`transaction` event. This reintroduced almost the exact same bug the
+bubble-menu script already fixed (see its changelog #3): clicking a menu button causes
+`mousedown` to blur the editor *before* the button's Bubble workflow runs. If a
+`transaction`/`selectionUpdate` fired at that exact moment (e.g. the workflow itself
+inserting content), `editor.isFocused` would read `false`, and the menu would hide
+itself mid-click — the click's action never visibly completing. Splitting focus
+tracking into its own variable, set only by an explicit `focus` event and never read
+reactively as `isFocused`, avoids this: a transient blur from clicking a button no
+longer has any way to hide the menu.
+
+`currentlyFocusedIndex` also solves a separate problem: without it, calling
+`updateMenuForIndex()` on every row (done once per `tryAttachAll()` scan, see below)
+would show the menu for **every** row that happens to have an empty top-level
+paragraph, all at once — not just the row the user is actually in.
+
+**Hiding is otherwise automatic** — no separate "hide on input" code exists. The
+moment the user types a character, `parent.textContent.length` becomes > 0, so the
+very next `transaction` event re-runs the check and it fails, hiding the menu. Same
+for cursor moving to a non-empty line, or into a list/table.
+
+**All triggers are routed through a resettable `setTimeout` debounce
+(`scheduleUpdateMenuForIndex()`), not called directly** — `focus`,
+`selectionUpdate`, `transaction`, `scroll`, `resize`, and even the per-scan
+call inside `tryAttachAll()` all go through it. This exists because a
+blurred editor regaining focus can cause the browser to momentarily restore
+the *previous* selection before a click resolves to its actual new
+position. This script originally called `updateMenuForIndex()` directly from
+several of those triggers — most notably `focus` itself, the single worst
+place to read selection state, since it fires before ProseMirror has
+resolved the click. Any one of those direct calls could catch that brief
+stale-selection window and paint the menu at the wrong (previous) position
+for a moment before a later event corrected it. Every call to
+`scheduleUpdateMenuForIndex()` now clears any previously pending timer and
+starts a new one (`SETTLE_DELAY_MS`, 50ms by default), so the actual update
+only runs once the selection has stopped changing for that long — no matter
+which event triggered it or how many frames the burst spans.
+
+**Outside-click detection** (`mousedown` listener, capture phase): if a click lands
+outside both the menu element and its matching editor wrapper, the menu is
+force-hidden, any pending scheduled update for that row is cancelled (so it
+can't fire afterward and undo the hide), and `currentlyFocusedIndex` is
+cleared. Handles clicking elsewhere on the page entirely, and also handles
+switching between rows — clicking into a different row's editor is itself a
+`mousedown` outside the previous row's wrapper/menu, so the old menu gets hidden
+by this same listener.
+
+**Deliberately does NOT hide via a `blur` listener** for the same reason described
+above — it would hide the menu before a button's click action completes.
+
+---
+
+## Positioning logic — `positionMenu()`
+
+**Handling transformed ancestors (`getFixedContainingBlockOffset()`)**: any ancestor
+element with a CSS `transform` (even a subtle one Bubble applies for animations or
+conditional visibility) becomes the **containing block** for any `position: fixed`
+descendant per the CSS spec — meaning fixed positioning is calculated relative to
+that transformed ancestor's box instead of the actual browser viewport. An earlier
+attempt fixed this by reparenting the menu to `document.body`, but that broke
+Bubble's Repeating-Group data context (the row's own button workflows stopped
+working since the element was no longer inside its RG cell). Instead, the script
+walks up from the menu element looking for the nearest ancestor with a computed
+`transform` other than `none`; if found, that ancestor's own `getBoundingClientRect()`
+left/top is subtracted from the target coordinates before positioning. The DOM
+structure is left untouched — only the coordinate math adapts to whichever
+containing block actually applies.
+
+1. **Finding the cursor's real position**: `view.coordsAtPos(from)` is NOT used here.
+   On an **empty** paragraph, browsers can report a collapsed rect that belongs to
+   the previous line/element instead of the actual empty line — a known ProseMirror
+   quirk on empty blocks. Instead, the script walks to the real DOM node at that
+   position via `view.domAtPos(from)` (walking up from a text node to its parent
+   Element if needed) and reads that element's own `getBoundingClientRect()`. This is
+   the empty paragraph's own box, so it's reliable.
+2. **Horizontal**: menu is left-aligned to the cursor/line (not centered, since there's
+   no selection width to center on). Clamped to stay within the viewport (`8px`
+   padding on each side) — there is no per-wrapper bounds clamping (removed; it was
+   causing offset issues since a wrapper's own bounding rect didn't line up cleanly
+   with the actual cursor position).
+3. **Vertical**: shown 8px above the line by default. If there isn't enough room above
+   (too close to the top of the viewport), flips to show 8px below instead — same
+   logic as the bubble menu.
+
+---
+
+## Row re-scanning (MutationObserver)
+Identical strategy to the bubble-menu script — `tryAttachAll()` scans for all wrapper
+elements matching `WRAPPER_ID_PREFIX`, attaches listeners to any row not yet attached,
+and a `MutationObserver` on `document.body` re-runs this on every DOM change so
+newly-rendered RG rows get picked up. Two safety-net `setTimeout` scans (1s, 3s) cover
+edge-case timing on initial page load.
+
+**One addition vs. the bubble-menu script:** `tryAttachAll()` also calls
+`scheduleUpdateMenuForIndex(index)` once immediately after attaching, for every
+row, every scan. This sets the menu's correct initial display state right away —
+otherwise the menu keeps whatever `display` Bubble gave it by default (usually
+visible) until the user actually clicks into that row's editor and fires the
+first event. This call is routed through the debounce (not called directly)
+because a `MutationObserver` rescan can land at any moment, including during
+the brief stale-selection window right after a focus regain — a direct call
+there would repaint the wrong position just as easily as a direct call from
+`focus` itself would.
+
+---
+
+## Configuration constants (top of the script)
+
+| Constant | What it should be set to |
+|---|---|
+| `WRAPPER_ID_PREFIX` | The prefix of the ID Attribute on the Tiptap input element (before the row index number) |
+| `MENU_ID_PREFIX` | The prefix of the ID Attribute on your custom floating-menu element (before the row index number) |
+
+Both assume the same per-row index suffix (`0`, `1`, `2`...) as generated by "Current
+cell's index" in the Repeating Group.
+
+---
+
+## Setup checklist (Bubble side)
+
+1. Tiptap input element → ID Attribute = `tiptap-proposal-[Current cell's index]`
+   (already set from the bubble-menu setup, reused here)
+2. Your custom floating-menu element (Group/element with insert-table, heading,
+   list, divider buttons, etc.) → ID Attribute =
+   `floating-menu-tiptap-proposal-[Current cell's index]`
+3. Each button → keep its existing Bubble workflow that inserts/formats content —
+   this script never touches those workflows
+4. If the Tiptap plugin has its own native Floating Menu setting, keep it **off** —
+   this script fully replaces it
+5. Paste the script from `huzlly-tiptap-rg-floating-menu.html` into an HTML element
+   on the page (once per page, not per row) — can be the same HTML element already
+   used for the bubble-menu script, or a separate one
+
+---
+
+## Known issues fixed during development (changelog)
+
+1. **Same-ID-across-rows problem** — fixed the same way as the bubble menu: bypass
+   native mechanism, key everything off the row index instead of a shared ID.
+2. **Menu triggering inside lists/blockquotes/tables** — an empty line inside a
+   bullet list or table cell was also triggering the menu. Fixed by requiring
+   `parent.type.name === 'paragraph'` AND `$anchor.depth === 1` (paragraph must be a
+   direct child of the doc, not nested inside another block type).
+3. **Menu positioned wrong / overlapping the line above** — root cause:
+   `coordsAtPos()` on an empty paragraph can return a rect belonging to the previous
+   line instead of the actual empty line (ProseMirror quirk with empty blocks).
+   Fixed by using `domAtPos()` to get the real DOM element and reading its own
+   `getBoundingClientRect()` instead.
+4. **Wrapper-based bounds clamping causing left-offset** — an earlier version
+   clamped the menu's horizontal position against a "bounds group" element's own
+   rect (same idea as the bubble menu's optional bounds group). This introduced an
+   unwanted left-side gap because that wrapper's rect didn't line up cleanly with
+   the actual cursor position for this use case. Removed entirely — horizontal
+   clamping now only uses the viewport edges.
+5. **Menu always visible on load** — the script only *hid* the menu reactively, in
+   response to editor events (`selectionUpdate`, `transaction`). Until the user
+   actually clicked into an editor and triggered one of those events, the menu kept
+   whatever default `display` Bubble gave it (visible). Fixed by calling
+   `updateMenuForIndex()` once immediately after attaching each row, so every row
+   gets its correct initial hidden/visible state right away instead of waiting for
+   the first interaction.
+6. **Menu showing for a row nobody was editing** — even after fix #5, the menu could
+   still show for a row that merely satisfied the "empty top-level paragraph" check
+   without actually being the focused editor (e.g. right after page load, before any
+   row has focus, or while a different row is being actively edited). Fixed by
+   adding an explicit `editor.isFocused` check as the first condition in
+   `isCursorOnEmptyLine()` — the menu only shows for the row that is actually focused.
+7. **Menu still shifted right even with correct `rect.left` and `margin: 0`** — root
+   cause: a CSS `transform` on some ancestor of the menu element (common with
+   Bubble's animated or conditionally-visible groups). Per the CSS spec, any
+   ancestor with a `transform` becomes the **containing block** for
+   `position: fixed` descendants — so the menu's fixed positioning was being
+   calculated relative to that transformed ancestor instead of the actual
+   viewport, even though `getBoundingClientRect()` on the cursor's own DOM node
+   was already correct.
+   An earlier attempt at fixing this reparented the menu element to
+   `document.body` — this positioned it correctly, but broke Bubble's
+   Repeating-Group data context (row workflows depend on the element staying
+   inside its RG cell), so the menu's own buttons stopped working. Fixed instead
+   by finding that transformed ancestor via `getFixedContainingBlockOffset()`
+   and subtracting its own bounding rect from the target coordinates — the DOM
+   structure is never touched, only the coordinate math accounts for whichever
+   containing block actually applies.
+8. **Menu hid itself before a button's click action completed** — an earlier
+   version checked `editor.isFocused` directly inside the reactive
+   `isCursorOnEmptyLine()` show/hide check. Clicking a menu button causes
+   `mousedown` to blur the editor a moment *before* that button's Bubble
+   workflow runs; if a `transaction`/`selectionUpdate` fired at that instant
+   (e.g. the workflow itself inserting content), `isFocused` read `false` and
+   the menu hid mid-click — almost the exact same bug already fixed in the
+   bubble-menu script (see its changelog #3). Fixed by tracking focus in a
+   separate `currentlyFocusedIndex` variable, set only via an explicit `focus`
+   event and never read reactively as `isFocused` — a transient blur from
+   clicking a button no longer has any way to hide the menu.
+9. **Had to click outside more than once to actually hide the menu** — the
+   outside-click `mousedown` listener hid the menu (`display: none`) correctly on
+   the first click, but never cleared `currentlyFocusedIndex`. Since blurring the
+   editor doesn't change its selection, the cursor was still logically sitting on
+   an empty top-level paragraph. So the next time `MutationObserver` triggered a
+   `tryAttachAll()` scan for any unrelated reason, `updateMenuForIndex()` ran
+   again, saw `index === currentlyFocusedIndex` still true, and re-showed the
+   menu — even though focus was genuinely gone. Fixed by clearing
+   `currentlyFocusedIndex` inside the same outside-click branch that hides the
+   menu, so a later scan no longer has any reason to bring it back.
+10. **Menu flashed at its previous position when clicking back into an editor
+    after having clicked away** — root cause: `updateMenuForIndex()` was being
+    called directly from several places, most notably from inside the `focus`
+    handler itself. A blurred editor regaining focus can cause the browser to
+    momentarily restore the PREVIOUS selection before a click resolves to its
+    actual new position, and `focus` in particular fires *before* ProseMirror
+    has resolved that new position — so a direct call from `focus` was
+    reading selection state at the worst possible moment. The same risk
+    existed for the direct calls from `selectionUpdate`, `transaction`,
+    `scroll`, `resize`, and the per-scan call in `tryAttachAll()` (the latter
+    especially, since a `MutationObserver` rescan can land at any moment,
+    including mid-refocus). Fixed by introducing
+    `scheduleUpdateMenuForIndex()`, a resettable `setTimeout` debounce
+    (`SETTLE_DELAY_MS`, 50ms by default): every one of those triggers now
+    goes through it instead of calling `updateMenuForIndex()` directly, so
+    the actual show/hide/position work only runs once the selection has
+    stopped changing for the full delay — regardless of which event
+    triggered it or how many frames the burst spans. The outside-click
+    handler was also updated to cancel any pending scheduled update for a
+    row before hiding it, so a queued update from just before the click
+    can't fire afterward and undo the hide.
