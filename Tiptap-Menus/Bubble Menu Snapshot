@@ -129,7 +129,9 @@ filters these out so the menu only ever appears for genuine text highlights.
 reliably the instant this row's editor truly loses focus — cancelling any pending
 debounce (so a stale callback can't fire afterward and flash the menu back) and
 hiding immediately. The blur handler is skipped when `mousedownWasInsideMenu` is true
-(see below), so clicking a format button doesn't hide the very menu being used.
+**or** when `inputFocusedForIndex[index]` is true (see next section for both), so
+clicking a format button, or focusing the menu's own input field, doesn't hide the
+very menu being used.
 
 **Outside-click detection** (separate `mousedown` listener on `document`, capture phase):
 if a click lands outside both the menu element and its matching editor wrapper, the
@@ -139,12 +141,87 @@ the click landed inside the menu — see next section for why.
 
 ---
 
+## Letting real form fields (e.g. "Insert Link" URL input) live inside the menu
+
+A menu button (Bold, Italic) is just a click target — it never needs actual DOM focus,
+so the `e.preventDefault()` trick (next section) works fine for it. An `<input>` living
+inside the menu is different: it needs **genuine DOM focus** to be typeable at all, and
+while the user is typing into it, `editor.isFocused` is legitimately `false` (focus
+really did move off the ProseMirror content) — but that must not be treated as "user
+clicked away and the menu should hide."
+
+Two things track and protect this state:
+
+```js
+const inputFocusedForIndex = {}; // index -> true while a menu input has real DOM focus
+```
+
+**1. `mousedown` (capture phase) — deciding whether to `preventDefault()`:**
+
+```js
+const isRealFormControl = e.target.closest(
+  'input, textarea, select, [contenteditable], [data-allow-focus]'
+);
+if (!isRealFormControl) {
+  e.preventDefault(); // keep editor focused, don't let it blur
+}
+```
+
+`.closest()` (not `.matches()`) is important here — Bubble typically renders its Input
+element wrapped in one or more container `<div>`s, so the actual click target
+(`e.target`) is very often that wrapper `div`, not the `<input>` itself. `.matches()`
+only checks the exact clicked element and would miss this, incorrectly treating the
+input as a plain button and blocking its focus. `.closest()` walks up the ancestor
+chain and correctly finds the real form control even when the click lands on a
+wrapping element.
+
+**2. `focusin` / `focusout` (capture phase, on `document`) — tracking the lock:**
+
+```js
+document.addEventListener('focusin', (e) => {
+  // if e.target (or an ancestor) inside this row's menu is a real form control,
+  // inputFocusedForIndex[index] = true
+}, true);
+
+document.addEventListener('focusout', (e) => {
+  // if focus is leaving a menu input AND relatedTarget isn't still inside
+  // the same menu (e.g. Tab from the URL field to a "Go" button),
+  // inputFocusedForIndex[index] = false, then re-run updateMenuForIndex(index)
+}, true);
+```
+
+`focusin`/`focusout` (rather than the input's own `focus`/`blur`) are used because they
+bubble, so a single `document`-level listener catches focus entering/leaving any menu
+input across every row without needing per-input listeners wired up individually.
+`focusout`'s `e.relatedTarget` (where focus is headed) is checked so that tabbing
+between two controls *within the same menu* doesn't release the lock mid-interaction —
+only once focus actually leaves the whole menu is `updateMenuForIndex()` re-run to
+decide whether to hide (editor also not focused) or reposition (editor still focused).
+
+Both `updateMenuForIndex()` and the editor's `blur` handler check
+`inputFocusedForIndex[index]` first and bail out immediately if true, leaving the menu
+exactly as-is while the user is typing.
+
+**Known side effect:** while a menu input holds focus, `editor.isFocused` is `false` —
+so a format button clicked in that exact moment won't have a "currently focused editor"
+to apply to (Bubble's workflow targets whichever editor was last focused). Clicking
+back into the editor content restores focus normally.
+
+---
+
 ## Why menu-button clicks call `e.preventDefault()` on mousedown
 
 ```js
+```js
+const isRealFormControl = e.target.closest(
+  'input, textarea, select, [contenteditable], [data-allow-focus]'
+);
+
 if (menuEl && menuEl.contains(e.target)) {
   mousedownWasInsideMenu = true;
-  e.preventDefault(); // keep editor focused, don't let it blur
+  if (!isRealFormControl) {
+    e.preventDefault(); // keep editor focused, don't let it blur
+  }
 }
 ```
 
@@ -158,6 +235,11 @@ button's Bubble workflow (which applies formatting to "the currently focused edi
 keeps working correctly. `preventDefault()` on `mousedown` does **not** block the
 subsequent `click`/`mouseup`, so the button's own workflow still fires normally — it
 only blocks the focus-shift default action.
+
+Real form controls (`input`, `textarea`, `select`, `[contenteditable]`, or anything
+manually flagged with `data-allow-focus`) are excluded from this `preventDefault()` —
+see the section above for why, and for the accompanying `focusin`/`focusout` tracking
+that keeps the menu from hiding while one of them is focused.
 
 ---
 
@@ -284,3 +366,24 @@ All three assume the same per-row index suffix (`0`, `1`, `2`...) as generated b
    solved differently: `e.preventDefault()` on `mousedown` for clicks inside the menu
    stops that blur from happening at all, so button clicks no longer need a focus
    check workaround.
+
+8. **An `<input>` inside the menu (e.g. an "Insert Link" URL field) couldn't be
+   focused/typed into at all** — root cause was twofold:
+   - The blanket `e.preventDefault()` on every menu `mousedown` (fix #7 above) blocks
+     the browser's default *focus* action too, not just the blur it was meant to
+     stop. For a plain button that's harmless (buttons don't need real focus), but
+     for an `<input>` it meant the input's own "focus me" default action never ran —
+     the input was permanently unfocusable even though the menu itself worked fine.
+   - The first attempted fix checked `e.target.matches('input, textarea, ...')` to
+     decide when to skip `preventDefault()`. This missed cases where Bubble renders
+     the actual `<input>` wrapped inside one or more container `<div>`s and the
+     `mousedown` lands on that wrapper rather than the input itself — `.matches()`
+     only checks the exact clicked element, so the wrapper click was still treated
+     as a plain button and still got `preventDefault()`'d.
+   Fixed by (a) switching the check to `e.target.closest(...)`, which walks up the
+   ancestor chain and correctly finds the real form control even when the click
+   lands on a wrapping element, and (b) adding `inputFocusedForIndex` tracking via
+   `focusin`/`focusout` listeners so that once the input does have real focus, both
+   `updateMenuForIndex()` and the editor's `blur` handler know to leave the menu
+   alone instead of hiding it (since `editor.isFocused` is legitimately `false` at
+   that point, which would otherwise read as "user clicked away").
