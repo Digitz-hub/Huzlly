@@ -26,6 +26,92 @@
   // menu's own input.
   const inputFocusedForIndex = {};
 
+  // Tracks the DOM overlay element(s) currently drawn for each row's "fake
+  // selection" highlight (one <div> per visual line, since a selection can
+  // wrap). Populated by showFakeSelectionForIndex(), cleared by
+  // hideFakeSelectionForIndex(). Only ever non-empty while
+  // inputFocusedForIndex[index] is true — see those two functions below.
+  const fakeSelectionOverlaysForIndex = {};
+
+  const FAKE_SELECTION_COLOR = 'rgba(53, 140, 255, 0.35)'; // <-- CHANGE (tweak to match your highlight color)
+  const FAKE_SELECTION_Z_INDEX = 9998; // just under the menu itself (9999)
+
+  // Draws a manual highlight over the row's current selection range, using
+  // the SAME real selection the menu was built from — this is what lets the
+  // user still see which text they're editing while their real DOM focus
+  // has moved onto the menu's own input (e.g. an "Insert Link" URL field).
+  //
+  // Why this is needed at all: ProseMirror keeps its internal selection
+  // alive after blur (that's what lets updateMenuForIndex/isFocused logic
+  // work), but the BROWSER's native selection highlight is a rendering
+  // effect tied to real DOM focus — the instant focus leaves the editor,
+  // the browser stops painting that blue highlight, even though the
+  // selection itself hasn't changed. So we paint our own.
+  //
+  // Uses the browser's own Range.getClientRects() (via view.domAtPos) rather
+  // than a ProseMirror decoration/plugin — this only needs read access to
+  // the already-rendered DOM, so it works with the raw Editor instance we
+  // already have, without touching the plugin's own extension list.
+  // getClientRects() returns one rect per visual line, so wrapped
+  // selections get one overlay div per line automatically.
+  function showFakeSelectionForIndex(index) {
+    const editor = editorsByIndex[index];
+    if (!editor) return;
+
+    const { from, to } = editor.state.selection;
+    if (from === to) return; // nothing highlighted, nothing to draw
+
+    hideFakeSelectionForIndex(index); // clear any previous overlay first
+
+    const { view } = editor;
+    let startPos, endPos;
+    try {
+      startPos = view.domAtPos(from);
+      endPos = view.domAtPos(to);
+    } catch (e) {
+      return; // position no longer valid (row content changed underneath us)
+    }
+
+    const range = document.createRange();
+    try {
+      range.setStart(startPos.node, startPos.offset);
+      range.setEnd(endPos.node, endPos.offset);
+    } catch (e) {
+      return;
+    }
+
+    const rects = Array.from(range.getClientRects());
+    if (!rects.length) return;
+
+    fakeSelectionOverlaysForIndex[index] = rects.map((rect) => {
+      const div = document.createElement('div');
+      div.style.position = 'fixed';
+      div.style.left = `${rect.left}px`;
+      div.style.top = `${rect.top}px`;
+      div.style.width = `${rect.width}px`;
+      div.style.height = `${rect.height}px`;
+      div.style.background = FAKE_SELECTION_COLOR;
+      div.style.pointerEvents = 'none'; // never intercept clicks/scroll
+      div.style.zIndex = String(FAKE_SELECTION_Z_INDEX);
+      document.body.appendChild(div);
+      return div;
+    });
+  }
+
+  function hideFakeSelectionForIndex(index) {
+    const existing = fakeSelectionOverlaysForIndex[index];
+    if (existing) existing.forEach((el) => el.remove());
+    fakeSelectionOverlaysForIndex[index] = null;
+  }
+
+  // Called on scroll/resize while a menu input has real focus, so the
+  // highlight tracks the text underneath it instead of drifting once the
+  // page moves. Simplest correct approach is a full redraw (rects are cheap
+  // to compute), same as we do for the initial paint.
+  function repositionFakeSelectionForIndex(index) {
+    if (fakeSelectionOverlaysForIndex[index]) showFakeSelectionForIndex(index);
+  }
+
   function scheduleUpdateMenuForIndex(index) {
     if (pendingTimeoutForIndex[index]) clearTimeout(pendingTimeoutForIndex[index]);
     pendingTimeoutForIndex[index] = setTimeout(() => {
@@ -182,8 +268,22 @@
       // editor fresh each time via updateMenuForIndex), so these only need
       // attaching once per index, not per editor instance.
       if (!scrollResizeAttachedForIndex.has(index)) {
-        window.addEventListener('scroll', () => updateMenuForIndex(index), true);
-        window.addEventListener('resize', () => updateMenuForIndex(index), true);
+        window.addEventListener(
+          'scroll',
+          () => {
+            updateMenuForIndex(index);
+            repositionFakeSelectionForIndex(index);
+          },
+          true
+        );
+        window.addEventListener(
+          'resize',
+          () => {
+            updateMenuForIndex(index);
+            repositionFakeSelectionForIndex(index);
+          },
+          true
+        );
         scrollResizeAttachedForIndex.add(index);
       }
     });
@@ -237,6 +337,7 @@
 
       if (!clickedInsideMenu && !clickedInsideEditor) {
         menuEl.style.display = 'none';
+        hideFakeSelectionForIndex(index); // defensive: don't leave a highlight stranded
       }
     });
   }, true);
@@ -257,6 +358,13 @@
           e.target.closest('input, textarea, select, [contenteditable], [data-allow-focus]')
         ) {
           inputFocusedForIndex[index] = true;
+
+          // Capture + paint the fake highlight RIGHT NOW, at the moment
+          // real focus lands on the menu's input. editor.state.selection
+          // is still correct at this exact point (ProseMirror hasn't
+          // touched it), so this is the reliable place to snapshot it —
+          // waiting any later risks the row's content changing underneath.
+          showFakeSelectionForIndex(index);
         }
       });
     },
@@ -277,6 +385,13 @@
         if (goingTo && menuEl.contains(goingTo)) return;
 
         inputFocusedForIndex[index] = false;
+
+        // Focus has genuinely left the menu's input now — remove the fake
+        // highlight. If focus went back to the editor, the browser's own
+        // native selection highlight takes over automatically; if focus
+        // left the row entirely, updateMenuForIndex() below will hide the
+        // menu too.
+        hideFakeSelectionForIndex(index);
 
         // Focus has genuinely left the menu's input now. Re-evaluate: hide
         // if the editor isn't focused either (user clicked away entirely),
