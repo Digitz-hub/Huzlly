@@ -1,0 +1,222 @@
+<script>
+(function () {
+  const WRAPPER_ID_PREFIX = 'tiptap-proposal-'; // <-- CHANGE
+  const MENU_ID_PREFIX = 'bubble-menu-tiptap-proposal-'; // <-- CHANGE
+  const BOUNDS_GROUP_ID_PREFIX = 'tiptap-proposal-'; // <-- CHANGE
+
+  const editorsByIndex = {};
+  const attachedEditorByIndex = {}; // index -> editor instance currently wired up (handles row re-render)
+  const scrollResizeAttachedForIndex = new Set(); // index-based, not editor-based
+
+  // A blurred-then-refocused editor can momentarily restore the PREVIOUS
+  // selection before the click resolves to its real new position — firing a
+  // selectionUpdate/transaction with stale data before the corrected one
+  // arrives a moment later. Routing every call through this resettable timer
+  // means only the settled state, after SETTLE_DELAY_MS of no further
+  // updates, actually paints — same fix already proven in the table/floating
+  // menu scripts.
+  const pendingTimeoutForIndex = {};
+  const SETTLE_DELAY_MS = 50;
+
+  function scheduleUpdateMenuForIndex(index) {
+    if (pendingTimeoutForIndex[index]) clearTimeout(pendingTimeoutForIndex[index]);
+    pendingTimeoutForIndex[index] = setTimeout(() => {
+      pendingTimeoutForIndex[index] = null;
+      updateMenuForIndex(index);
+    }, SETTLE_DELAY_MS);
+  }
+
+  // Tracks whether the mousedown currently in progress landed inside any
+  // bubble menu. Read by the 'blur' handler below — a menu button click
+  // blurs the editor a moment before its own Bubble workflow runs, and we
+  // don't want that transient blur to hide the very menu being clicked.
+  let mousedownWasInsideMenu = false;
+
+  function getEditorFromWrapper(wrapperEl) {
+    const mountPoint = wrapperEl.querySelector('[id^="tiptapEditor-"]');
+    if (!mountPoint) return null;
+    const proseMirrorEl = mountPoint.querySelector('.ProseMirror');
+    if (!proseMirrorEl) return null;
+    return proseMirrorEl.editor || null;
+  }
+
+  function positionMenu(menuEl, boundsGroupId, centerX, topY, bottomY) {
+    const menuWidth = menuEl.offsetWidth;
+    const menuHeight = menuEl.offsetHeight;
+    let minX = 8;
+    let maxX = window.innerWidth - 8;
+    const boundsGroup = boundsGroupId ? document.getElementById(boundsGroupId) : null;
+    if (boundsGroup) {
+      const groupRect = boundsGroup.getBoundingClientRect();
+      minX = groupRect.left + 8;
+      maxX = groupRect.right - 8;
+    }
+    let left = centerX - menuWidth / 2;
+    if (left < minX) left = minX;
+    if (left + menuWidth > maxX) left = maxX - menuWidth;
+    let top = topY - menuHeight - 8;
+    if (top < 8) top = bottomY + 8;
+    menuEl.style.left = `${left}px`;
+    menuEl.style.top = `${top}px`;
+    menuEl.style.transform = 'none';
+  }
+
+  function updateMenuForIndex(index) {
+    const editor = editorsByIndex[index];
+    const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+    if (!editor || !menuEl) return;
+
+    // Gate on real editor focus. ProseMirror does NOT clear its internal
+    // selection just because DOM focus moves elsewhere, so without this a
+    // blurred row's stale (but still "non-empty text") selection would get
+    // re-shown by a later scroll/resize tick or an unrelated transaction
+    // (Bubble re-render, workflow, etc.) — which is exactly why the previous
+    // "force-hidden until an editor event clears it" approach still broke:
+    // ANY transaction cleared that flag, not just ones from real user
+    // interaction with this row. Checking editor.isFocused directly, on
+    // every single call, is the authoritative source of truth instead.
+    if (!editor.isFocused) {
+      menuEl.style.display = 'none';
+      return;
+    }
+
+    const { selection } = editor.state;
+
+    // Only show for a genuine text selection with a real (non-collapsed) range.
+    // Arrow-keying past an "atom" node (horizontal rule, table, etc.) produces a
+    // NodeSelection/CellSelection/GapCursor instead of a TextSelection — those are
+    // NOT the user highlighting text, even though selection.empty can be false for
+    // them (NodeSelection/CellSelection) or true (GapCursor). Checking the
+    // selection's own type via toJSON() (present on every ProseMirror selection
+    // type) is the reliable way to filter these out without importing TextSelection.
+    const selectionType = selection.toJSON ? selection.toJSON().type : null;
+    const isRealTextSelection = selectionType === 'text' && !selection.empty;
+
+    if (!isRealTextSelection) {
+      menuEl.style.display = 'none';
+      return;
+    }
+
+    const { view } = editor;
+    const { from, to } = selection;
+    const start = view.coordsAtPos(from);
+    const end = view.coordsAtPos(to);
+    const centerX = (start.left + end.left) / 2;
+    const topY = Math.min(start.top, end.top);
+    const bottomY = Math.max(start.bottom, end.bottom);
+
+    menuEl.style.position = 'fixed';
+    menuEl.style.zIndex = '9999';
+    menuEl.style.display = 'flex';
+    positionMenu(menuEl, BOUNDS_GROUP_ID_PREFIX + index, centerX, topY, bottomY);
+  }
+
+  function tryAttachAll() {
+    document.querySelectorAll(`[id^="${WRAPPER_ID_PREFIX}"]`).forEach((wrapperEl) => {
+      const index = wrapperEl.id.replace(WRAPPER_ID_PREFIX, '');
+
+      const freshEditor = getEditorFromWrapper(wrapperEl);
+      if (freshEditor) editorsByIndex[index] = freshEditor;
+
+      const editor = editorsByIndex[index];
+      if (!editor) return;
+
+      // Compare by editor IDENTITY, not just index — if Bubble destroys and
+      // re-renders this row (re-sort, data refresh), a brand-new Editor
+      // instance shows up at the same index. A plain "have we seen this
+      // index before" check would skip re-attaching listeners to the new
+      // instance, silently breaking the menu for that row until a full page
+      // reload.
+      if (attachedEditorByIndex[index] !== editor) {
+        editor.on('selectionUpdate', () => scheduleUpdateMenuForIndex(index));
+        editor.on('transaction', () => scheduleUpdateMenuForIndex(index));
+
+        // Direct focus-based hide: as soon as this row's editor loses focus,
+        // hide its menu — unless the mousedown causing this blur landed on
+        // the menu itself (a button click), in which case leave it alone so
+        // the click's own workflow gets to run.
+        editor.on('blur', () => {
+          if (mousedownWasInsideMenu) return;
+
+          // Cancel any selectionUpdate/transaction-triggered timer already
+          // queued for this row before the blur happened. Without this,
+          // that stale callback still fires a moment later, reads the
+          // selection (which does NOT clear itself on blur), and re-shows
+          // the menu we just hid — the exact "takes 2 clicks" symptom.
+          if (pendingTimeoutForIndex[index]) {
+            clearTimeout(pendingTimeoutForIndex[index]);
+            pendingTimeoutForIndex[index] = null;
+          }
+
+          const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+          if (menuEl) menuEl.style.display = 'none';
+        });
+
+        attachedEditorByIndex[index] = editor;
+
+        // Set initial display state ONCE, right when we first attach — not
+        // on every later tryAttachAll() rescan (MutationObserver reruns this
+        // on any DOM change anywhere on the page, very frequent on a live
+        // Bubble page). After this, display is driven only by real editor
+        // events, scroll/resize, and the outside-click handler below.
+        updateMenuForIndex(index);
+      }
+
+      // Scroll/resize listeners are index-based (they look up the current
+      // editor fresh each time via updateMenuForIndex), so these only need
+      // attaching once per index, not per editor instance.
+      if (!scrollResizeAttachedForIndex.has(index)) {
+        window.addEventListener('scroll', () => updateMenuForIndex(index), true);
+        window.addEventListener('resize', () => updateMenuForIndex(index), true);
+        scrollResizeAttachedForIndex.add(index);
+      }
+    });
+  }
+
+  // Same outside-click hide as before, PLUS: records whether this mousedown
+  // landed inside any bubble menu (read by the 'blur' handler above). This
+  // runs in the capture phase, which fires before the browser's internal
+  // focus-change/blur dispatch for this same click — so the flag is set
+  // correctly before blur checks it.
+  //
+  // Also calls e.preventDefault() when the mousedown landed inside a menu.
+  // This stops the browser from ever shifting focus away from the editor in
+  // the first place, so no 'blur' event fires at all for menu-button clicks
+  // — meaning editor.isFocused stays true the whole time, and the format
+  // button's Bubble workflow (which targets "the currently focused editor")
+  // keeps working correctly. preventDefault() on mousedown does NOT block
+  // the subsequent click/mouseup, so the button's workflow still fires
+  // normally — it only blocks the focus-shift default action.
+  document.addEventListener('mousedown', (e) => {
+    mousedownWasInsideMenu = false;
+    Object.keys(editorsByIndex).forEach((index) => {
+      const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+      if (menuEl && menuEl.contains(e.target)) {
+        mousedownWasInsideMenu = true;
+        e.preventDefault(); // keep editor focused, don't let it blur
+      }
+    });
+
+    Object.keys(editorsByIndex).forEach((index) => {
+      const editor = editorsByIndex[index];
+      const menuEl = document.getElementById(MENU_ID_PREFIX + index);
+      if (!editor || !menuEl) return;
+
+      const wrapperEl = document.getElementById(WRAPPER_ID_PREFIX + index);
+      const clickedInsideMenu = menuEl.contains(e.target);
+      const clickedInsideEditor = wrapperEl && wrapperEl.contains(e.target);
+
+      if (!clickedInsideMenu && !clickedInsideEditor) {
+        menuEl.style.display = 'none';
+      }
+    });
+  }, true);
+
+  const observer = new MutationObserver(() => tryAttachAll());
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  tryAttachAll();
+  setTimeout(tryAttachAll, 1000); // <-- CHANGE (optional)
+  setTimeout(tryAttachAll, 3000);
+})();
+</script>
