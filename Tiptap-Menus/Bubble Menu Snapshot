@@ -1,4 +1,4 @@
-# Huzlly — Custom Tiptap Bubble Menu inside Repeating Group
+# Huzlly — Custom Tiptap Bubble Menu inside Repeating Group (v3)
 
 ## Problem this solves
 The "Rich text editor (Tiptap.dev)" plugin's built-in Bubble Menu feature works by
@@ -209,6 +209,76 @@ back into the editor content restores focus normally.
 
 ---
 
+## Keeping the selection highlight visible while a menu input is focused ("fake selection")
+
+**Problem:** the instant real DOM focus moves onto a menu input (e.g. an "Insert Link"
+URL field), the browser stops painting its native blue selection highlight over the
+text — even though `editor.state.selection` still has the correct `from`/`to` the
+whole time (ProseMirror doesn't clear its internal selection on blur; that's exactly
+what lets `isFocused`-gated logic elsewhere in this script work). Result: the user
+loses the visual cue for which text they're about to apply the link/format to while
+they're typing into the menu's own input.
+
+**Fix:** manually paint a substitute highlight over that same `from`/`to` range for as
+long as the menu input holds focus, using the browser's own selection-rectangle math
+rather than a ProseMirror decoration/plugin (no bundler is available in this vanilla
+script environment, so importing `Plugin`/`PluginKey` isn't an option — this approach
+only needs read access to the already-rendered DOM):
+
+```js
+const fakeSelectionOverlaysForIndex = {}; // index -> array of overlay <div>s currently drawn
+const FAKE_SELECTION_COLOR = 'rgba(53, 140, 255, 0.35)'; // <-- CHANGE to match your theme
+const FAKE_SELECTION_Z_INDEX = 9998; // just under the menu itself (9999)
+
+function showFakeSelectionForIndex(index) { ... }
+function hideFakeSelectionForIndex(index) { ... }
+function repositionFakeSelectionForIndex(index) { ... }
+```
+
+- `showFakeSelectionForIndex(index)` reads `editor.state.selection`'s `from`/`to`,
+  converts each into a real DOM position via `view.domAtPos()`, builds a native
+  `Range` from those two points, and calls `range.getClientRects()` — the same
+  rectangle math the browser itself uses internally to paint a real selection
+  highlight. One `<div>` (fixed-positioned, `pointer-events: none`, `z-index: 9998`)
+  is drawn per returned rect, which means wrapped multi-line selections automatically
+  get one overlay per visual line rather than a single box that ignores line-wrapping.
+- Both `domAtPos()` calls and the `Range` construction are wrapped in `try/catch`: if
+  the row's content changes underneath the captured `from`/`to` (e.g. a Bubble
+  re-render mid-edit) those positions can go stale, and this fails silently — the
+  overlay just doesn't draw rather than throwing. It won't self-heal until focus moves
+  again, but this is scoped to "user is filling in a link URL for a couple seconds,"
+  so it's an edge case rather than a real risk.
+- `hideFakeSelectionForIndex(index)` removes any overlay `<div>`s currently tracked
+  for that index and clears the entry.
+- `repositionFakeSelectionForIndex(index)` is a full redraw (cheap, since rects are
+  cheap to compute) — called from the same `scroll`/`resize` listeners that already
+  reposition the menu itself, so the highlight tracks the text underneath it instead
+  of drifting once the page moves.
+
+**Wired into the existing focus-tracking, at the exact points where the selection is
+still guaranteed correct:**
+
+- `focusin` (capture phase, same listener that sets `inputFocusedForIndex[index] = true`):
+  calls `showFakeSelectionForIndex(index)` immediately. This is the reliable moment to
+  snapshot the selection — right when real focus lands on the menu's input, before
+  ProseMirror or Bubble can do anything else that might invalidate it.
+- `focusout` (capture phase, same listener that sets `inputFocusedForIndex[index] = false`):
+  calls `hideFakeSelectionForIndex(index)` once focus has genuinely left the whole
+  menu (not just moved to another control inside the same menu). If focus returned to
+  the editor, the browser's own native highlight resumes automatically at that point;
+  if focus left the row entirely, `updateMenuForIndex()` (called right after) also
+  hides the menu.
+- Outside-click handler: also calls `hideFakeSelectionForIndex(index)` defensively, so
+  a click away from the row can't strand a highlight with no menu input focused to
+  justify it.
+
+No dedicated ID Attribute is needed on menu inputs for this to work — it reuses the
+same generic `input, textarea, select, [contenteditable], [data-allow-focus]` selector
+already used for focus tracking, so any current or future menu input (an "Insert Link"
+field, for example) is covered automatically.
+
+---
+
 ## Why menu-button clicks call `e.preventDefault()` on mousedown
 
 ```js
@@ -290,8 +360,8 @@ All three assume the same per-row index suffix (`0`, `1`, `2`...) as generated b
 4. In the Tiptap plugin's own element inspector, set **Bubble Menu = "no"** (the
    plugin's native built-in mechanism should stay off, since this script fully
    replaces it).
-5. Paste the script from `huzlly-tiptap-rg-bubble-menu.html` into an HTML element on
-   the page (once per page, not per row).
+5. Paste the script from `huzlly-tiptap-rg-bubble-menu-v3.html` into an HTML element
+   on the page (once per page, not per row).
 
 ---
 
@@ -387,3 +457,25 @@ All three assume the same per-row index suffix (`0`, `1`, `2`...) as generated b
    `updateMenuForIndex()` and the editor's `blur` handler know to leave the menu
    alone instead of hiding it (since `editor.isFocused` is legitimately `false` at
    that point, which would otherwise read as "user clicked away").
+
+9. **Selection highlight disappeared while typing into a menu input (e.g. the
+   "Insert Link" URL field)** — root cause: the browser's native selection highlight
+   is a rendering effect tied to real DOM focus, not to ProseMirror's internal
+   selection state. The moment focus legitimately moved off the editor and onto the
+   menu's own input (fix #8, above), the browser stopped painting the blue highlight
+   over the selected text, even though `editor.state.selection` still had the
+   correct `from`/`to` the entire time — leaving the user with no visual indicator
+   of which text they were about to link/format. Fixed by manually drawing a
+   substitute highlight: capturing `from`/`to` at the moment the menu input gains
+   focus (via the same `focusin` listener that sets `inputFocusedForIndex`),
+   converting those positions to real DOM coordinates with `view.domAtPos()` and the
+   browser's own `Range.getClientRects()`, and rendering one absolutely-positioned,
+   `pointer-events: none` overlay `<div>` per returned rect (so wrapped multi-line
+   selections get one overlay per line automatically). The overlay is removed the
+   moment focus genuinely leaves the menu (`focusout`) or the row is clicked away
+   from entirely, and repositioned on `scroll`/`resize` alongside the menu itself.
+   A ProseMirror plugin/decoration approach was considered first but ruled out since
+   this vanilla script environment has no bundler to import `Plugin`/`PluginKey` —
+   the DOM `Range` approach needed only read access to the already-rendered editor,
+   with no internal ProseMirror APIs. See "Keeping the selection highlight visible
+   while a menu input is focused" above for the full implementation.
