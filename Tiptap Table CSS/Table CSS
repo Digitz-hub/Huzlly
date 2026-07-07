@@ -1,0 +1,54 @@
+[id^="tiptap-proposal-"] {
+  /* ===== TABLE WRAPPER ===== */
+  & .tableWrapper {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+  }
+  /* ===== TABLE - fixed 80% width, centered ===== */
+  & .ProseMirror table {
+    border-collapse: collapse !important;
+    table-layout: fixed !important;
+    width: 80% !important;
+    max-width: 80% !important;
+    margin: 0 auto !important;
+  }
+  /* ===== CELLS - padding explicitly set, adjust as needed ===== */
+  & .ProseMirror table td,
+  & .ProseMirror table th {
+    border: 1px solid #d1d5db !important;
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+    vertical-align: top !important;
+    box-sizing: border-box !important;
+    position: relative !important;
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+    white-space: normal !important;
+  }
+  & .ProseMirror table th {
+    background-color: #f3f4f6 !important;
+    font-weight: 600 !important;
+    text-align: left !important;
+  }
+  /* Row/paragraph level extra borders reset */
+  & .ProseMirror table tr {
+    border: none !important;
+  }
+  & .ProseMirror table td *,
+  & .ProseMirror table th * {
+    border: none !important;
+    max-width: 100% !important;
+  }
+  /* ===== MERGED CELLS - vertical center ===== */
+  & .ProseMirror table td[rowspan],
+  & .ProseMirror table th[rowspan],
+  & .ProseMirror table td[colspan],
+  & .ProseMirror table th[colspan] {
+    vertical-align: middle !important;
+  }
+}
