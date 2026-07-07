@@ -4,6 +4,12 @@
   const MENU_ID_PREFIX = 'floating-menu-tiptap-proposal-'; // <-- CHANGE
 
   const editorsByIndex = {};
+  // Maps index -> the actual .ProseMirror contenteditable DOM node (not the
+  // whole row wrapper). Used by the outside-click handler to tell a real
+  // click into the editable content apart from a click that merely lands
+  // somewhere inside the wrapper (e.g. padding around the editor) — see the
+  // note on the mousedown listener below.
+  const proseMirrorElByIndex = {};
   const listenersAttachedForIndex = new Set();
   // Tracks which row's editor was most recently focused. Set only via an
   // explicit 'focus' event — NOT read reactively inside the show/hide check —
@@ -32,11 +38,12 @@
     }, SETTLE_DELAY_MS);
   }
 
-  function getEditorFromWrapper(wrapperEl) {
+  function getEditorFromWrapper(wrapperEl, index) {
     const mountPoint = wrapperEl.querySelector('[id^="tiptapEditor-"]');
     if (!mountPoint) return null;
     const proseMirrorEl = mountPoint.querySelector('.ProseMirror');
     if (!proseMirrorEl) return null;
+    proseMirrorElByIndex[index] = proseMirrorEl;
     return proseMirrorEl.editor || null;
   }
 
@@ -147,7 +154,7 @@
     document.querySelectorAll(`[id^="${WRAPPER_ID_PREFIX}"]`).forEach((wrapperEl) => {
       const index = wrapperEl.id.replace(WRAPPER_ID_PREFIX, '');
 
-      const freshEditor = getEditorFromWrapper(wrapperEl);
+      const freshEditor = getEditorFromWrapper(wrapperEl, index);
       if (freshEditor) editorsByIndex[index] = freshEditor;
 
       const editor = editorsByIndex[index];
@@ -184,15 +191,24 @@
   // Deliberately NOT using focus/blur to hide the menu — clicking a menu button
   // blurs the editor before its Bubble workflow runs, which would hide the menu
   // mid-click (same bug already fixed in the bubble-menu version).
+  //
+  // clickedInsideEditor is checked against the actual .ProseMirror contenteditable
+  // node (proseMirrorElByIndex), NOT the row wrapper. Checking the wrapper instead
+  // would count a click anywhere inside it — including padding around the editor
+  // that isn't part of the contenteditable area — as "inside the editor". Such a
+  // click doesn't actually focus the ProseMirror node (no 'focus' event fires) and
+  // doesn't move the cursor, so if it were treated as "inside", this branch would
+  // skip entirely: the menu would stay visible and currentlyFocusedIndex would
+  // never clear, even though real focus was already gone.
   document.addEventListener('mousedown', (e) => {
     Object.keys(editorsByIndex).forEach((index) => {
       const editor = editorsByIndex[index];
       const menuEl = document.getElementById(MENU_ID_PREFIX + index);
       if (!editor || !menuEl) return;
 
-      const wrapperEl = document.getElementById(WRAPPER_ID_PREFIX + index);
+      const proseMirrorEl = proseMirrorElByIndex[index];
       const clickedInsideMenu = menuEl.contains(e.target);
-      const clickedInsideEditor = wrapperEl && wrapperEl.contains(e.target);
+      const clickedInsideEditor = proseMirrorEl && proseMirrorEl.contains(e.target);
 
       if (!clickedInsideMenu && !clickedInsideEditor) {
         if (pendingTimeoutForIndex[index]) {
