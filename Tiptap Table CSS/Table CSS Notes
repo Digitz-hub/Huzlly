@@ -1,0 +1,27 @@
+# Tiptap Table Styling — Reference Notes
+
+Scope selector: `[id^="tiptap-proposal-"]` (targets all Bubble instances of the Tiptap editor whose element ID starts with `tiptap-proposal-`).
+
+## Change log
+
+### Table centering (current)
+- **What changed:** `.ProseMirror table` margin changed from `margin: 0 !important;` to `margin: 0 auto !important;`
+- **Why:** Table is set to a fixed `width: 80%` inside a full-width `.tableWrapper`. A `<table>` is a block-level element, so `margin: 0 auto` horizontally centers it within its parent, same as centering a `<div>`.
+- **No workflow change needed** — this is pure CSS, no Bubble workflow/JS required.
+- **Caveat:** If `.tableWrapper`'s parent has flex/grid layout or a conflicting `text-align`/alignment rule, that could override centering — check parent container CSS if table doesn't visually center.
+- **Future extension:** If per-table alignment is needed later (e.g. some tables left-aligned, some centered), CSS alone can't differentiate between tables. Would need a data attribute or class added per table (via workflow or JS) and conditional CSS keyed off that attribute/class.
+
+## Current rule breakdown
+
+| Section | Purpose |
+|---|---|
+| `.tableWrapper` | Full-width (100%) wrapper, hides horizontal overflow, no margin |
+| `.ProseMirror table` | Fixed 80% width table, `table-layout: fixed`, collapsed borders, **centered via `margin: 0 auto`** |
+| `td, th` | Uniform border, padding (4px top/bottom, 12px left/right), top-aligned content, word wrapping enabled |
+| `th` | Light gray background, bold, left-aligned text (header styling) |
+| `tr` | Border reset (borders live on cells, not rows) |
+| `td *, th *` | Strips inherited borders from nested elements, caps their width to 100% of cell |
+| `td[rowspan], td[colspan]` (merged cells) | Vertical-align middle for merged cells specifically |
+
+## Full CSS
+See `tiptap-table-style.css` in this same delivery for the complete, ready-to-paste stylesheet.
