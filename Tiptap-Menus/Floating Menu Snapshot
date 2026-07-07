@@ -287,3 +287,19 @@ cell's index" in the Repeating Group.
     handler was also updated to cancel any pending scheduled update for a
     row before hiding it, so a queued update from just before the click
     can't fire afterward and undo the hide.
+11. **Menu didn't hide when clicking padding inside the Tiptap input** — the
+    outside-click `mousedown` handler checked
+    `wrapperEl.contains(e.target)` to decide `clickedInsideEditor`, where
+    `wrapperEl` is the whole row's ID-Attribute element. If the Tiptap input
+    has padding, a click there lands inside `wrapperEl` but outside the
+    actual `.ProseMirror` contenteditable area — so it doesn't focus the
+    editor and doesn't move the cursor, yet still satisfied
+    `clickedInsideEditor`, causing the whole hide branch to be skipped.
+    Since the click never fired a real `focus`/`blur` event, the menu kept
+    whatever state it was already in. Fixed by caching each row's actual
+    `.ProseMirror` DOM node (`proseMirrorElByIndex`, populated inside
+    `getEditorFromWrapper()`) and checking `clickedInsideEditor` against
+    that node instead of the wrapper — so only a click that truly lands on
+    the editable content counts as "inside," and a click on padding now
+    correctly falls into the outside-click branch, hiding the menu and
+    clearing `currentlyFocusedIndex`.
